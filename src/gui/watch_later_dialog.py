@@ -127,6 +127,9 @@ class WatchLaterDialog:
         self.video_list_frame.bind('<Configure>', lambda e: self.video_canvas.configure(scrollregion=self.video_canvas.bbox('all')))
         self.video_canvas.bind('<Configure>', lambda e: self.video_canvas.itemconfig(self.video_canvas_window, width=e.width))
 
+        # 绑定鼠标滚轮事件
+        self._bind_mousewheel()
+
         # 底部按钮栏
         bottom_frame = ttk.Frame(main_frame)
         bottom_frame.pack(fill='x', pady=5)
@@ -291,6 +294,25 @@ class WatchLaterDialog:
                     logger.error(f"下载回调失败: {e}")
 
             self.window.after(0, self.close)
+
+    def _bind_mousewheel(self):
+        """绑定鼠标滚轮事件"""
+        def _on_mousewheel(event):
+            """处理鼠标滚轮事件"""
+            if self.video_canvas.winfo_exists():
+                self.video_canvas.yview_scroll(int(-1 * (event.delta / 120)), 'units')
+
+        # 绑定鼠标滚轮
+        self.video_canvas.bind('<MouseWheel>', _on_mousewheel)
+
+        # 将滚动绑定到所有子元素
+        def _bind_to_children(widget):
+            widget.bind('<MouseWheel>', _on_mousewheel)
+            for child in widget.winfo_children():
+                _bind_to_children(child)
+
+        # 延迟绑定到子元素，确保它们已经创建
+        self.window.after(100, lambda: _bind_to_children(self.video_list_frame))
 
     def close(self):
         """关闭对话框"""

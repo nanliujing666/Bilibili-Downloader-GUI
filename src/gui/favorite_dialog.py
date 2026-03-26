@@ -406,13 +406,16 @@ class FavoriteDialog:
             self.window.after(0, self.close)
 
     def _on_mousewheel(self, event):
-        """处理鼠标滚轮事件，检测是否滚动到底部"""
+        """处理鼠标滚轮事件，执行滚动并检测是否到底部"""
         # 检查canvas是否还存在（对话框可能已关闭）
         try:
             if not self.video_canvas.winfo_exists():
                 return "break"
         except tk.TclError:
             return "break"
+
+        # 执行滚动
+        self.video_canvas.yview_scroll(int(-1 * (event.delta / 120)), 'units')
 
         # 检测是否滚动到底部
         if self.video_canvas.yview()[1] >= 0.95 and self.has_more and not self.is_loading:

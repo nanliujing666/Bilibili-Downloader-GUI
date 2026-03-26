@@ -49,7 +49,7 @@ class DownloadProgress:
 
 
 class DownloadService:
-    """下载服务"""
+    """下载服务 - 支持任务队列和可配置并发数"""
 
     def __init__(self, auth_service: Optional[AuthService] = None):
         self.auth_service = auth_service
@@ -69,6 +69,147 @@ class DownloadService:
 
         # 下载进度跟踪
         self._progress: dict[str, DownloadProgress] = {}
+
+        # 任务队列和并发控制
+        self._download_queue: asyncio.Queue[str] = asyncio.Queue()
+        self._queue_workers: list[asyncio.Task] = []
+        self._max_concurrent: int = 3  # 默认并发数
+        self._queue_started: bool = False
+
+    def set_max_concurrent(self, max_concurrent: int) -> None:
+        """设置最大并发下载数"""
+        if max_concurrent < 1:
+            max_concurrent = 1
+        if max_concurrent > 10:
+            max_concurrent = 10  # 限制最大10个并发
+
+        old_value = self._max_concurrent
+        self._max_concurrent = max_concurrent
+
+        # 如果并发数增加，需要启动新的worker
+        if max_concurrent > old_value and self._queue_started:
+            for i in range(max_concurrent - old_value):
+                worker = asyncio.create_task(self._queue_worker(f"worker-{old_value + i}"))
+                self._queue_workers.append(worker)
+                logger.info(f"新增下载工作线程: worker-{old_value + i}")
+
+        logger.info(f"最大并发下载数设置为: {max_concurrent}")
+
+    def get_max_concurrent(self) -> int:
+        """获取当前最大并发下载数"""
+        return self._max_concurrent
+
+    def start_queue(self) -> None:
+        """启动下载队列（如果不已启动）"""
+        if self._queue_started:
+            return
+
+        self._queue_started = True
+        for i in range(self._max_concurrent):
+            worker = asyncio.create_task(self._queue_worker(f"worker-{i}"))
+            self._queue_workers.append(worker)
+            logger.info(f"启动下载工作线程: worker-{i}")
+
+    async def stop_queue(self) -> None:
+        """停止下载队列"""
+        if not self._queue_started:
+            return
+
+        self._queue_started = False
+
+        # 取消所有worker
+        for worker in self._queue_workers:
+            worker.cancel()
+
+        # 等待所有worker完成
+        if self._queue_workers:
+            await asyncio.gather(*self._queue_workers, return_exceptions=True)
+
+        self._queue_workers.clear()
+        logger.info("下载队列已停止")
+
+    async def _queue_worker(self, worker_name: str) -> None:
+        """队列工作线程 - 一次处理一个任务，完成后再取下一个"""
+        logger.info(f"{worker_name} 开始运行")
+
+        while self._queue_started:
+            try:
+                # 从队列获取任务（等待新任务）
+                task_id = await asyncio.wait_for(
+                    self._download_queue.get(),
+                    timeout=1.0
+                )
+
+                logger.info(f"{worker_name} 开始处理任务: {task_id}")
+
+                # 处理这个任务直到完成
+                await self._process_task(task_id)
+
+                # 标记任务完成
+                self._download_queue.task_done()
+
+                logger.info(f"{worker_name} 完成任务: {task_id}")
+
+            except asyncio.TimeoutError:
+                # 超时，继续循环检查是否还应该运行
+                continue
+            except asyncio.CancelledError:
+                logger.info(f"{worker_name} 被取消")
+                break
+            except Exception as e:
+                logger.error(f"{worker_name} 处理任务时出错: {e}")
+
+        logger.info(f"{worker_name} 停止运行")
+
+    async def _process_task(self, task_id: str) -> None:
+        """处理单个下载任务"""
+        state = self.state_manager.get_state()
+
+        task = None
+        for t in state.download_tasks:
+            if t.task_id == task_id:
+                task = t
+                break
+
+        if task is None:
+            logger.error(f"任务不存在: {task_id}")
+            return
+
+        # 检查任务状态
+        if task.status not in [TaskStatus.PENDING, TaskStatus.PAUSED, TaskStatus.FAILED]:
+            logger.info(f"任务 {task_id} 状态为 {task.status}，跳过")
+            return
+
+        # 检查FFmpeg
+        if not check_ffmpeg():
+            error_msg = "FFmpeg未安装，请先安装FFmpeg"
+            logger.error(error_msg)
+            self.state_manager.update(
+                lambda s: s.update_task(task_id, status=TaskStatus.FAILED, error_message=error_msg)
+            )
+            self.event_bus.publish('download.error', {'task_id': task_id, 'error': error_msg})
+            return
+
+        # 开始下载
+        self.state_manager.update(
+            lambda s: s.update_task(task_id, status=TaskStatus.DOWNLOADING)
+        )
+
+        self._active_downloads[task_id] = True
+        self._progress[task_id] = DownloadProgress()
+
+        try:
+            await self._do_download(task)
+        except Exception as e:
+            logger.error(f"下载失败 {task_id}: {e}")
+            self.state_manager.update(
+                lambda s: s.update_task(task_id, status=TaskStatus.FAILED, error_message=str(e))
+            )
+            self.event_bus.publish('download.error', {'task_id': task_id, 'error': str(e)})
+        finally:
+            self._active_downloads.pop(task_id, None)
+            self._progress.pop(task_id, None)
+            await self._cleanup_temp_files(task_id)
 
     async def parse_video(self, url: str):
         """解析视频URL"""
@@ -118,9 +259,12 @@ class DownloadService:
         return task_id
 
     async def start_download(self, task_id: str) -> None:
-        """开始下载"""
-        state = self.state_manager.get_state()
+        """开始下载 - 将任务添加到队列"""
+        # 确保队列已启动
+        self.start_queue()
 
+        # 检查任务是否存在
+        state = self.state_manager.get_state()
         task = None
         for t in state.download_tasks:
             if t.task_id == task_id:
@@ -131,36 +275,19 @@ class DownloadService:
             logger.error(f"任务不存在: {task_id}")
             return
 
-        # 检查FFmpeg是否可用
-        if not check_ffmpeg():
-            error_msg = "FFmpeg未安装，请先安装FFmpeg"
-            logger.error(error_msg)
-            self.state_manager.update(
-                lambda s: s.update_task(task_id, status=TaskStatus.FAILED, error_message=error_msg)
-            )
-            self.event_bus.publish('download.error', {'task_id': task_id, 'error': error_msg})
+        # 检查任务状态
+        if task.status not in [TaskStatus.PENDING, TaskStatus.PAUSED, TaskStatus.FAILED]:
+            logger.info(f"任务 {task_id} 已经在下载中或已完成，跳过")
             return
 
+        # 将任务添加到队列
+        await self._download_queue.put(task_id)
+        logger.info(f"任务 {task_id} 已加入下载队列，当前队列长度: {self._download_queue.qsize()}")
+
+        # 更新状态为等待中
         self.state_manager.update(
-            lambda s: s.update_task(task_id, status=TaskStatus.DOWNLOADING)
+            lambda s: s.update_task(task_id, status=TaskStatus.PENDING)
         )
-
-        self._active_downloads[task_id] = True
-        self._progress[task_id] = DownloadProgress()
-
-        try:
-            await self._do_download(task)
-        except Exception as e:
-            logger.error(f"下载失败 {task_id}: {e}")
-            self.state_manager.update(
-                lambda s: s.update_task(task_id, status=TaskStatus.FAILED, error_message=str(e))
-            )
-            self.event_bus.publish('download.error', {'task_id': task_id, 'error': str(e)})
-        finally:
-            self._active_downloads.pop(task_id, None)
-            self._progress.pop(task_id, None)
-            # 清理临时文件
-            await self._cleanup_temp_files(task_id)
 
     async def _do_download(self, task: DownloadTask) -> None:
         """执行完整下载流程"""

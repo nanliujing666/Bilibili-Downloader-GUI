@@ -316,6 +316,35 @@ class MainWindow(AsyncTkApp):
         # 根据自动设置禁用/启用手动选择
         self._update_quality_radio_state()
 
+        # 并发下载设置
+        ttk.Separator(parent, orient='horizontal').pack(fill='x', pady=15)
+        ttk.Label(parent, text="下载设置:", font=('Microsoft YaHei', 9, 'bold')).pack(anchor='w', pady=(10, 5))
+
+        ttk.Label(parent, text="同时下载视频数 (1-10):", font=('Microsoft YaHei', 9)).pack(anchor='w', pady=(5, 0))
+
+        concurrent_frame = ttk.Frame(parent)
+        concurrent_frame.pack(fill='x', pady=5)
+
+        self.concurrent_var = tk.IntVar(value=settings.max_concurrent)
+        self.concurrent_spinbox = tk.Spinbox(
+            concurrent_frame,
+            from_=1,
+            to=10,
+            textvariable=self.concurrent_var,
+            width=5,
+            command=self._on_concurrent_changed
+        )
+        self.concurrent_spinbox.pack(side='left')
+
+        ttk.Label(concurrent_frame, text="个", font=('Microsoft YaHei', 9)).pack(side='left', padx=5)
+
+        ttk.Label(
+            parent,
+            text="注: 每个进程先完成当前任务再开始下一个",
+            font=('Microsoft YaHei', 8),
+            foreground='gray'
+        ).pack(anchor='w', pady=(0, 5))
+
         # 窗口行为设置
         ttk.Separator(parent, orient='horizontal').pack(fill='x', pady=15)
         ttk.Label(parent, text="窗口设置:", font=('Microsoft YaHei', 9, 'bold')).pack(anchor='w', pady=(10, 5))
@@ -740,6 +769,17 @@ class MainWindow(AsyncTkApp):
         self._update_quality_radio_state()
         self._save_settings()
 
+    def _on_concurrent_changed(self):
+        """并发数改变"""
+        try:
+            value = int(self.concurrent_var.get())
+            if 1 <= value <= 10:
+                self.download_service.set_max_concurrent(value)
+                self._save_settings()
+                self.status_var.set(f"并发下载数已设置为 {value}")
+        except ValueError:
+            pass
+
     def _update_quality_radio_state(self):
         """更新质量单选按钮状态"""
         auto = self.auto_quality_var.get()
@@ -753,6 +793,7 @@ class MainWindow(AsyncTkApp):
         settings.default_quality = self.quality_var.get()
         settings.auto_quality = self.auto_quality_var.get()
         settings.minimize_to_tray = self.minimize_to_tray_var.get()
+        settings.max_concurrent = self.concurrent_var.get()
         settings.save(settings.get_default_path())
         self.status_var.set("设置已保存")
 
