@@ -1,0 +1,67 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+venv/
+ENV/
+env/
+.venv/
+env.bak/
+venv.bak/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Project specific - Privacy files
+bilibili.session
+*.session
+cookies.txt
+
+# Downloaded videos and temp files
+downloads/
+temp/
+.temp/
+*.mp4
+*.flv
+*.m4s
+
+# Logs
+*.log
+logs/
+
+# User config and data (stored in user home directory)
+# These are created at runtime and contain user-specific data:
+# ~/.bilibili_downloader/config.json         - User settings
+# ~/.bilibili_downloader/download_history.json - Download history
+# ~/.bilibili_downloader/download_tasks.json   - Saved download tasks
+
+# Claude IDE
+.claude/
+
+# FFmpeg (bundled) - Ignore all files but keep directory
+ffm/*
+!ffm/.gitkeep
