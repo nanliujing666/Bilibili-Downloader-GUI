@@ -208,28 +208,50 @@ class DownloadManager:
             self.tree.set(item, 'status', status)
 
     def _refresh_list(self):
-        """刷新任务列表"""
+        """刷新任务列表 - 增量更新，保留选中状态"""
         state = self.state_manager.get_state()
 
-        # 清除现有项目
-        for item in self.tree.get_children():
-            self.tree.delete(item)
-        self._task_items.clear()
+        # 保存当前选中项
+        selected_items = set(self.tree.selection())
+        selected_task_ids = {
+            task_id for task_id, item in self._task_items.items()
+            if item in selected_items
+        }
+
+        # 获取当前显示的任务ID
+        current_task_ids = set(self._task_items.keys())
+        new_task_ids = {task.task_id for task in state.download_tasks}
+
+        # 删除已不存在的任务
+        for task_id in current_task_ids - new_task_ids:
+            if task_id in self._task_items:
+                self.tree.delete(self._task_items[task_id])
+                del self._task_items[task_id]
 
         # 统计
         total = len(state.download_tasks)
         downloading = 0
         completed = 0
 
-        # 添加任务
+        # 添加新任务或更新现有任务
         for task in state.download_tasks:
             if task.status == TaskStatus.DOWNLOADING:
                 downloading += 1
             elif task.status == TaskStatus.COMPLETED:
                 completed += 1
 
-            item = self._add_task_to_tree(task)
-            self._task_items[task.task_id] = item
+            if task.task_id in self._task_items:
+                # 更新现有任务
+                self._update_task_in_tree(task)
+            else:
+                # 添加新任务
+                item = self._add_task_to_tree(task)
+                self._task_items[task.task_id] = item
+
+        # 恢复选中状态
+        for task_id in selected_task_ids:
+            if task_id in self._task_items:
+                self.tree.selection_add(self._task_items[task_id])
 
         # 更新统计
         self.stats_var.set(f"总任务: {total} | 下载中: {downloading} | 已完成: {completed}")
@@ -325,6 +347,58 @@ class DownloadManager:
 
         return item
 
+    def _update_task_in_tree(self, task: DownloadTask) -> None:
+        """更新树中的现有任务"""
+        if task.task_id not in self._task_items:
+            return
+
+        item = self._task_items[task.task_id]
+        progress_text = f"{task.progress:.1f}%"
+        speed_text = format_speed(task.download_speed)
+
+        # 检查文件是否存在（仅对已完成任务）
+        file_exists = True
+        if task.status == TaskStatus.COMPLETED:
+            import os
+            file_exists = os.path.exists(task.download_path)
+
+        # 获取文件大小
+        if file_exists:
+            size_text = self._format_file_size(task.download_path)
+        else:
+            size_text = format_size(task.file_size)
+
+        # 状态文本
+        status_text = task.status_text
+        if task.status == TaskStatus.COMPLETED and not file_exists:
+            status_text = "文件已删"
+
+        # 来源文本
+        source_text = self._get_source_text(task)
+
+        # 更新值
+        self.tree.item(item, values=(
+            status_text,
+            source_text,
+            progress_text,
+            speed_text,
+            size_text,
+            task.download_path[:35] + '...' if len(task.download_path) > 35 else task.download_path
+        ))
+
+        # 更新颜色标签
+        if task.status == TaskStatus.COMPLETED:
+            if file_exists:
+                self.tree.item(item, tags=('completed',))
+            else:
+                self.tree.item(item, tags=('missing',))
+        elif task.status == TaskStatus.FAILED:
+            self.tree.item(item, tags=('failed',))
+        elif task.status == TaskStatus.DOWNLOADING:
+            self.tree.item(item, tags=('downloading',))
+        else:
+            self.tree.item(item, tags=())
+
     def _start_refresh_loop(self):
         """启动自动刷新循环"""
         self._refresh_list()
@@ -365,15 +439,28 @@ class DownloadManager:
             self.download_service.resume_download(task_id)
 
     def _remove_selected(self):
-        """删除选中的任务"""
-        if not messagebox.askyesno("确认", "确定要删除选中的任务吗？"):
+        """删除选中的任务（支持批量删除任何状态的任务）"""
+        task_ids = self._get_selected_task_ids()
+        if not task_ids:
+            messagebox.showinfo("提示", "请先选择要删除的任务")
             return
 
-        for task_id in self._get_selected_task_ids():
-            self.download_service.cancel_download(task_id)
-            self.state_manager.update(lambda s: s.remove_task(task_id))
+        count = len(task_ids)
+        if not messagebox.askyesno("确认", f"确定要删除选中的 {count} 个任务吗？"):
+            return
+
+        for task_id in task_ids:
+            # 如果是正在下载的任务，先取消
+            state = self.state_manager.get_state()
+            for task in state.download_tasks:
+                if task.task_id == task_id and task.status == TaskStatus.DOWNLOADING:
+                    self.download_service.cancel_download(task_id)
+                    break
+            # 直接从状态中移除
+            self.state_manager.update(lambda s, tid=task_id: s.remove_task(tid))
 
         self._refresh_list()
+        messagebox.showinfo("完成", f"已删除 {count} 个任务")
 
     def _clear_completed(self):
         """清空已完成的任务"""

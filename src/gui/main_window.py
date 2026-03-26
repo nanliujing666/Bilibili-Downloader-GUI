@@ -837,8 +837,19 @@ class MainWindow(AsyncTkApp):
             # 最小化到托盘
             self._minimize_to_tray()
         else:
-            # 直接退出
-            if messagebox.askyesno("确认", "确定要退出吗？当前下载任务将被暂停。"):
+            # 检查是否有活跃的下载任务
+            state = self.state_manager.get_state()
+            active_tasks = [
+                t for t in state.download_tasks
+                if t.status in [TaskStatus.PENDING, TaskStatus.DOWNLOADING, TaskStatus.PAUSED]
+            ]
+
+            # 只有在有活跃任务时才提示
+            if active_tasks:
+                if messagebox.askyesno("确认", f"确定要退出吗？当前有 {len(active_tasks)} 个下载任务将被暂停。"):
+                    self._do_exit()
+            else:
+                # 没有活跃任务，直接退出
                 self._do_exit()
 
     def _minimize_to_tray(self):

@@ -3,7 +3,7 @@
 ## 简介
 灵感来源于<https://github.com/Misaka10571/bilibili-cheese-downloader>，与该项目一样，这个项目也需要您自己准备FFmpeg，并将其放入ffm文件夹中，如果您下载了FFmpeg也可以正常工作。
 
-本项目是为了学习使用Claude Code而创建的。全程使用了Claude与everything-claude-code插件创建。
+本项目是为了学习使用Claude Code而创建的。全程使用了Claude与everything-claude-code插件创建。Python版本为3.14.3
 
 ## 功能
 

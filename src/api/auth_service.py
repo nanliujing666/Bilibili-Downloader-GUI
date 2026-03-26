@@ -167,20 +167,28 @@ class AuthService:
         """保存Cookie到文件"""
         if self.credential is None:
             return
-        
+
         try:
             cookies = self.credential.get_cookies()
+
+            # 处理 user_info，将 datetime 转换为字符串
+            user_info_dict = None
+            if self.user_info:
+                user_info_dict = asdict(self.user_info)
+                if user_info_dict.get('login_time'):
+                    user_info_dict['login_time'] = user_info_dict['login_time'].isoformat()
+
             data = {
                 'cookies': cookies,
                 'saved_at': datetime.now().isoformat(),
-                'user_info': asdict(self.user_info) if self.user_info else None
+                'user_info': user_info_dict
             }
-            
+
             with open(self.cookie_file, 'w', encoding='utf-8') as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)
-            
+
             logger.info(f"Cookie已保存")
-            
+
         except Exception as e:
             logger.error(f"保存Cookie失败: {e}")
     
@@ -198,7 +206,8 @@ class AuthService:
             self.credential = Credential(
                 sessdata=cookies.get('SESSDATA', ''),
                 bili_jct=cookies.get('bili_jct', ''),
-                buvid3=cookies.get('buvid3', '')
+                buvid3=cookies.get('buvid3', ''),
+                ac_time_value=cookies.get('ac_time_value', '')
             )
 
             user_info_data = data.get('user_info')
