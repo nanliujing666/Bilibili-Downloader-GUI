@@ -352,6 +352,32 @@ class MainWindow(AsyncTkApp):
             foreground='gray'
         ).pack(anchor='w', pady=(0, 5))
 
+        # 每次加载视频数设置
+        ttk.Label(parent, text="每次加载视频数 (10-50):", font=('Microsoft YaHei', 9)).pack(anchor='w', pady=(10, 0))
+
+        page_size_frame = ttk.Frame(parent)
+        page_size_frame.pack(fill='x', pady=5)
+
+        self.page_size_var = tk.IntVar(value=settings.page_size)
+        self.page_size_spinbox = tk.Spinbox(
+            page_size_frame,
+            from_=10,
+            to=50,
+            textvariable=self.page_size_var,
+            width=5,
+            command=self._on_page_size_changed
+        )
+        self.page_size_spinbox.pack(side='left')
+
+        ttk.Label(page_size_frame, text="个", font=('Microsoft YaHei', 9)).pack(side='left', padx=5)
+
+        ttk.Label(
+            parent,
+            text="注: 控制稍后再看列表每次显示的视频数量（滚动加载更多）",
+            font=('Microsoft YaHei', 8),
+            foreground='gray'
+        ).pack(anchor='w', pady=(0, 5))
+
         # 窗口行为设置
         ttk.Separator(parent, orient='horizontal').pack(fill='x', pady=15)
         ttk.Label(parent, text="窗口设置:", font=('Microsoft YaHei', 9, 'bold')).pack(anchor='w', pady=(10, 5))
@@ -790,6 +816,16 @@ class MainWindow(AsyncTkApp):
         except ValueError:
             pass
 
+    def _on_page_size_changed(self):
+        """每次加载视频数改变"""
+        try:
+            value = int(self.page_size_var.get())
+            if 10 <= value <= 50:
+                self._save_settings()
+                self.status_var.set(f"每次加载视频数已设置为 {value}")
+        except ValueError:
+            pass
+
     def _update_quality_radio_state(self):
         """更新质量单选按钮状态"""
         auto = self.auto_quality_var.get()
@@ -804,6 +840,7 @@ class MainWindow(AsyncTkApp):
         settings.auto_quality = self.auto_quality_var.get()
         settings.minimize_to_tray = self.minimize_to_tray_var.get()
         settings.max_concurrent = self.concurrent_var.get()
+        settings.page_size = self.page_size_var.get()
         settings.save(settings.get_default_path())
         self.status_var.set("设置已保存")
 

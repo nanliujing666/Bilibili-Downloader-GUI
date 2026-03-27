@@ -9,12 +9,13 @@ from typing import Optional, Callable, List
 from ..api.watch_later_api import WatchLaterApiClient
 from ..api.auth_service import AuthService
 from ..models.video import VideoInfo
+from ..config.settings import get_settings
 
 logger = logging.getLogger(__name__)
 
 
 class WatchLaterDialog:
-    """稍后再看选择对话框 - 带复选框选择"""
+    """稍后再看选择对话框 - 带复选框选择，支持滚动和分段加载"""
 
     def __init__(
         self,
@@ -41,8 +42,20 @@ class WatchLaterDialog:
         self._center_window()
 
         # 数据
-        self.videos: List[VideoInfo] = []
+        self.all_videos: List[VideoInfo] = []  # 所有视频
+        self.displayed_count: int = 0  # 已显示的视频数量
         self.video_checkboxes: dict = {}  # {index: BooleanVar}
+
+        # 分页设置 - 稍后再看一次性加载所有数据，前端分段显示
+        try:
+            settings = get_settings()
+            self.page_size: int = getattr(settings, 'page_size', 20)
+            if not isinstance(self.page_size, int) or self.page_size < 10:
+                self.page_size = 20
+        except Exception:
+            self.page_size = 20
+        self.is_loading: bool = False
+        self.has_more: bool = True
 
         # 创建事件循环
         self._loop = asyncio.new_event_loop()
@@ -102,7 +115,7 @@ class WatchLaterDialog:
         # 说明
         ttk.Label(
             main_frame,
-            text="选择要下载的视频",
+            text="选择要下载的视频（滚动加载更多）",
             font=('Microsoft YaHei', 9),
             foreground='gray'
         ).pack(pady=2)
@@ -123,12 +136,10 @@ class WatchLaterDialog:
         self.video_list_frame = ttk.Frame(self.video_canvas)
         self.video_canvas_window = self.video_canvas.create_window((0, 0), window=self.video_list_frame, anchor='nw')
 
-        # 绑定大小变化
-        self.video_list_frame.bind('<Configure>', lambda e: self.video_canvas.configure(scrollregion=self.video_canvas.bbox('all')))
-        self.video_canvas.bind('<Configure>', lambda e: self.video_canvas.itemconfig(self.video_canvas_window, width=e.width))
-
-        # 绑定鼠标滚轮事件
-        self._bind_mousewheel()
+        # 绑定canvas大小变化和滚动事件
+        self.video_list_frame.bind('<Configure>', self._on_video_list_configure)
+        self.video_canvas.bind('<Configure>', self._on_canvas_configure)
+        self.video_canvas.bind_all('<MouseWheel>', self._on_mousewheel)
 
         # 底部按钮栏
         bottom_frame = ttk.Frame(main_frame)
@@ -182,6 +193,15 @@ class WatchLaterDialog:
             command=self.close
         ).pack(side='left', padx=5)
 
+    def _on_video_list_configure(self, event=None):
+        """视频列表大小变化时更新canvas滚动区域"""
+        self.video_canvas.update_idletasks()
+        self.video_canvas.configure(scrollregion=self.video_canvas.bbox('all'))
+
+    def _on_canvas_configure(self, event=None):
+        """Canvas大小变化时更新内部窗口宽度"""
+        self.video_canvas.itemconfig(self.video_canvas_window, width=event.width)
+
     def _clear_video_list(self):
         """清空视频列表"""
         for widget in self.video_list_frame.winfo_children():
@@ -189,10 +209,10 @@ class WatchLaterDialog:
         self.video_checkboxes.clear()
 
     def _update_video_list(self):
-        """在主线程更新视频列表"""
+        """初始化视频列表UI（显示前page_size个）"""
         self._clear_video_list()
 
-        if not self.videos:
+        if not self.all_videos:
             ttk.Label(
                 self.video_list_frame,
                 text="稍后再看列表为空",
@@ -212,8 +232,22 @@ class WatchLaterDialog:
 
         ttk.Separator(self.video_list_frame, orient='horizontal').pack(fill='x', pady=2)
 
-        # 视频列表
-        for i, video in enumerate(self.videos):
+        # 显示第一批视频
+        self._append_video_rows(0, min(self.page_size, len(self.all_videos)))
+
+        # 启用下载按钮
+        self.download_btn.configure(state='normal')
+
+        # 更新状态
+        self._update_status()
+
+    def _append_video_rows(self, start_idx: int, end_idx: int):
+        """追加视频行到列表"""
+        for i in range(start_idx, end_idx):
+            if i >= len(self.all_videos):
+                break
+
+            video = self.all_videos[i]
             var = tk.BooleanVar(value=True)  # 默认全选
             self.video_checkboxes[i] = var
 
@@ -237,9 +271,22 @@ class WatchLaterDialog:
             duration_str = self._format_duration(video.duration)
             ttk.Label(row_frame, text=duration_str, width=10).pack(side='left', padx=2)
 
-        # 启用下载按钮
-        self.download_btn.configure(state='normal')
-        self.status_var.set(f"共 {len(self.videos)} 个视频，默认全选")
+        self.displayed_count = end_idx
+
+        # 更新滚动区域
+        self.video_canvas.update_idletasks()
+        self.video_canvas.configure(scrollregion=self.video_canvas.bbox('all'))
+
+        # 检查是否还有更多
+        if self.displayed_count >= len(self.all_videos):
+            self.has_more = False
+
+    def _update_status(self):
+        """更新状态标签"""
+        loaded = len(self.video_checkboxes)
+        total = len(self.all_videos)
+        more_str = "，向下滚动加载更多" if self.has_more and loaded < total else ""
+        self.status_var.set(f"已加载 {loaded}/{total} 个视频{more_str}")
 
     def _select_all(self):
         """全选"""
@@ -255,23 +302,65 @@ class WatchLaterDialog:
         """获取选中的视频"""
         selected = []
         for i, var in self.video_checkboxes.items():
-            if var.get() and 0 <= i < len(self.videos):
-                selected.append(self.videos[i])
+            if var.get() and 0 <= i < len(self.all_videos):
+                selected.append(self.all_videos[i])
         return selected
 
     async def _load_videos(self):
         """加载稍后再看列表"""
         self.window.after(0, lambda: self.status_var.set("正在加载稍后再看列表..."))
 
-        try:
-            self.videos = await self.watch_later_api.get_watch_later_videos()
-            self.window.after(0, self._update_video_list)
+        # 重置状态
+        self.displayed_count = 0
+        self.has_more = True
+        self.is_loading = True
+        self.all_videos = []
 
+        try:
+            self.all_videos = await self.watch_later_api.get_watch_later_videos()
+            self.window.after(0, self._update_video_list)
         except Exception as e:
             logger.error(f"加载稍后再看失败: {e}")
             error_msg = str(e)
             self.window.after(0, lambda msg=error_msg: self.status_var.set(f"加载失败: {msg}"))
             self.window.after(0, lambda: messagebox.showerror("错误", f"无法加载稍后再看: {e}", parent=self.window))
+        finally:
+            self.is_loading = False
+
+    def _load_more_videos(self):
+        """加载更多视频（分批显示）"""
+        if self.is_loading or not self.has_more:
+            return
+
+        if self.displayed_count >= len(self.all_videos):
+            self.has_more = False
+            return
+
+        # 计算下一批的结束位置
+        end_idx = min(self.displayed_count + self.page_size, len(self.all_videos))
+
+        # 追加显示
+        self._append_video_rows(self.displayed_count, end_idx)
+        self._update_status()
+
+    def _on_mousewheel(self, event):
+        """处理鼠标滚轮事件，执行滚动并检测是否到底部"""
+        # 检查canvas是否还存在（对话框可能已关闭）
+        try:
+            if not self.video_canvas.winfo_exists():
+                return "break"
+        except tk.TclError:
+            return "break"
+
+        # 执行滚动
+        self.video_canvas.yview_scroll(int(-1 * (event.delta / 120)), 'units')
+
+        # 检测是否滚动到底部（95%位置）
+        if self.video_canvas.yview()[1] >= 0.95 and self.has_more and not self.is_loading:
+            if self.displayed_count < len(self.all_videos):
+                self._load_more_videos()
+
+        return "break"
 
     def _download_selected(self):
         """下载选中的视频"""
@@ -295,27 +384,14 @@ class WatchLaterDialog:
 
             self.window.after(0, self.close)
 
-    def _bind_mousewheel(self):
-        """绑定鼠标滚轮事件"""
-        def _on_mousewheel(event):
-            """处理鼠标滚轮事件"""
-            if self.video_canvas.winfo_exists():
-                self.video_canvas.yview_scroll(int(-1 * (event.delta / 120)), 'units')
-
-        # 绑定鼠标滚轮
-        self.video_canvas.bind('<MouseWheel>', _on_mousewheel)
-
-        # 将滚动绑定到所有子元素
-        def _bind_to_children(widget):
-            widget.bind('<MouseWheel>', _on_mousewheel)
-            for child in widget.winfo_children():
-                _bind_to_children(child)
-
-        # 延迟绑定到子元素，确保它们已经创建
-        self.window.after(100, lambda: _bind_to_children(self.video_list_frame))
-
     def close(self):
         """关闭对话框"""
+        # 解绑鼠标滚轮事件
+        try:
+            self.video_canvas.unbind_all('<MouseWheel>')
+        except:
+            pass
+
         if self._loop and self._loop.is_running():
             self._loop.call_soon_threadsafe(self._loop.stop)
         self.window.destroy()

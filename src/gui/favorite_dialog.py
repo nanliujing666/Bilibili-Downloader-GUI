@@ -9,6 +9,7 @@ from typing import Optional, Callable, List
 from ..api.favorite_api import FavoriteApiClient
 from ..api.auth_service import AuthService
 from ..models.video import VideoInfo
+from ..config.settings import get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +47,7 @@ class FavoriteDialog:
         self.selected_favorite_id: Optional[str] = None
         self.video_checkboxes: dict = {}  # 存储视频勾选状态 {index: BooleanVar}
         self.current_page: int = 1
-        self.page_size: int = 20
+        self.page_size: int = 20  # 收藏夹使用固定的服务端分页大小
         self.is_loading: bool = False
         self.has_more: bool = True
 

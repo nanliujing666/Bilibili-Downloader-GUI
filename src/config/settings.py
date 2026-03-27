@@ -21,6 +21,9 @@ class Settings:
     auto_quality: bool = True           # 自动选择最佳质量
     max_concurrent: int = 3             # 最大并发下载数
     max_retry: int = 3                  # 最大重试次数
+
+    # 列表加载设置
+    page_size: int = 20                 # 每次分段加载的视频数量
     
     # 下载选项
     auto_merge: bool = True             # 自动合并音视频
