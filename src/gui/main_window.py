@@ -77,6 +77,10 @@ class MainWindow(AsyncTkApp):
         self.state_manager = get_state_manager()
         self.event_bus = get_event_bus()
 
+        # 加载设置并应用最大并发数
+        settings = get_settings()
+        self._pending_max_concurrent = settings.max_concurrent
+
         # 登录状态
         self.is_logged_in = False
         self.user_info: Optional[dict] = None
@@ -89,6 +93,9 @@ class MainWindow(AsyncTkApp):
         self._setup_event_handlers()
         self._check_saved_login()
         self._load_saved_tasks()
+
+        # 应用保存的最大并发数设置
+        self.run_async(self.download_service.set_max_concurrent(self._pending_max_concurrent))
 
     def _build_ui(self):
         """构建UI"""
@@ -777,7 +784,7 @@ class MainWindow(AsyncTkApp):
         try:
             value = int(self.concurrent_var.get())
             if 1 <= value <= 10:
-                self.download_service.set_max_concurrent(value)
+                self.run_async(self.download_service.set_max_concurrent(value))
                 self._save_settings()
                 self.status_var.set(f"并发下载数已设置为 {value}")
         except ValueError:

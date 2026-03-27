@@ -76,7 +76,7 @@ class DownloadService:
         self._max_concurrent: int = 3  # 默认并发数
         self._queue_started: bool = False
 
-    def set_max_concurrent(self, max_concurrent: int) -> None:
+    async def set_max_concurrent(self, max_concurrent: int) -> None:
         """设置最大并发下载数"""
         if max_concurrent < 1:
             max_concurrent = 1
@@ -92,6 +92,20 @@ class DownloadService:
                 worker = asyncio.create_task(self._queue_worker(f"worker-{old_value + i}"))
                 self._queue_workers.append(worker)
                 logger.info(f"新增下载工作线程: worker-{old_value + i}")
+
+        # 如果并发数减少，需要取消多余的worker
+        if max_concurrent < old_value and self._queue_started:
+            # 取消多余的worker（从列表末尾开始）
+            workers_to_cancel = self._queue_workers[max_concurrent:]
+            self._queue_workers = self._queue_workers[:max_concurrent]
+
+            for worker in workers_to_cancel:
+                worker.cancel()
+
+            # 等待被取消的worker完成
+            if workers_to_cancel:
+                await asyncio.gather(*workers_to_cancel, return_exceptions=True)
+                logger.info(f"已取消 {len(workers_to_cancel)} 个下载工作线程")
 
         logger.info(f"最大并发下载数设置为: {max_concurrent}")
 
@@ -295,6 +309,9 @@ class DownloadService:
         if task.status not in [TaskStatus.PENDING, TaskStatus.PAUSED, TaskStatus.FAILED]:
             logger.info(f"任务 {task_id} 已经在下载中或已完成，跳过")
             return
+
+        # 重置_active_downloads标志，确保任务可以正常开始
+        self._active_downloads[task_id] = True
 
         # 将任务添加到队列
         await self._download_queue.put(task_id)
@@ -607,6 +624,8 @@ class DownloadService:
                 break
 
         if task and task.status in [TaskStatus.PAUSED, TaskStatus.FAILED]:
+            # 重置_active_downloads标志，确保任务可以被正常处理
+            self._active_downloads[task_id] = True
             # 重置状态并重新开始
             self.state_manager.update(
                 lambda s: s.update_task(
