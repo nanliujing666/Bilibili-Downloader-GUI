@@ -221,6 +221,10 @@ class CheeseDialog:
             meta = await cheese_list.get_meta()
             self.course_title = meta.get('title', '未知课程')
 
+            # 获取season_id（如果从ep_id创建的，需要从meta中获取）
+            if season_id is None:
+                season_id = meta.get('season_id')
+
             # 获取课程列表
             episodes = await cheese_list.get_list()
 
@@ -232,7 +236,7 @@ class CheeseDialog:
                 ep_title = ep_meta.get('title', f'第{i+1}节')
 
                 video_info = VideoInfo(
-                    bvid=f"cheese_{season_id}_{ep.get_epid()}",
+                    bvid=f"cheese{season_id}",
                     cid=ep.get_epid(),
                     aid=0,
                     title=f"{i+1}. {ep_title}",

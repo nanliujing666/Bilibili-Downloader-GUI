@@ -162,8 +162,27 @@ class VideoApiClient:
         """
         logger.info(f"[视频API] 开始获取下载链接: bvid={bvid}, cid={cid}, 请求质量={quality}")
 
-        v = video.Video(bvid=bvid, credential=self.credential)
-        download_url_data = await v.get_download_url(cid=cid)
+        # 课程视频特殊处理
+        if bvid.startswith("cheese"):
+            # 提取season_id
+            season_id = bvid.replace("cheese", "")
+            if season_id.startswith("_"):
+                season_id = season_id.split("_")[1] if "_" in season_id else season_id[1:]
+            cs = cheese.CheeseList(season_id=int(season_id), credential=self.credential)
+            # 获取课程列表，找到对应cid的episode
+            episodes = await cs.get_list()
+            target_ep = None
+            for ep in episodes:
+                if ep.get_epid() == cid:
+                    target_ep = ep
+                    break
+            if target_ep is None:
+                raise ApiError(f"课程中未找到cid={cid}的章节")
+            # 获取下载URL
+            download_url_data = await target_ep.get_download_url()
+        else:
+            v = video.Video(bvid=bvid, credential=self.credential)
+            download_url_data = await v.get_download_url(cid=cid)
 
         # 记录原始返回数据中的质量信息
         if 'dash' in download_url_data and download_url_data['dash']:
@@ -208,14 +227,32 @@ class VideoApiClient:
         """
         try:
             logger.info(f"[视频API] 获取可用质量: bvid={bvid}, cid={cid}")
-            v = video.Video(bvid=bvid, credential=self.credential)
-            # 尝试获取播放器信息，包含可用质量
-            info = await v.get_info()
-            logger.info(f"[视频API] 获取视频信息成功: title={info.get('title', 'unknown')}")
 
-            # 从 dash 数据中获取质量信息
-            download_url_data = await v.get_download_url(cid=cid)
-            logger.info(f"[视频API] 获取下载URL数据成功")
+            # 课程视频特殊处理
+            if bvid.startswith("cheese"):
+                season_id = bvid.replace("cheese", "")
+                if season_id.startswith("_"):
+                    season_id = season_id.split("_")[1] if "_" in season_id else season_id[1:]
+                cs = cheese.CheeseList(season_id=int(season_id), credential=self.credential)
+                episodes = await cs.get_list()
+                target_ep = None
+                for ep in episodes:
+                    if ep.get_epid() == cid:
+                        target_ep = ep
+                        break
+                if target_ep is None:
+                    raise ApiError(f"课程中未找到cid={cid}的章节")
+                download_url_data = await target_ep.get_download_url()
+                logger.info(f"[视频API] 获取课程下载URL数据成功")
+            else:
+                v = video.Video(bvid=bvid, credential=self.credential)
+                # 尝试获取播放器信息，包含可用质量
+                info = await v.get_info()
+                logger.info(f"[视频API] 获取视频信息成功: title={info.get('title', 'unknown')}")
+
+                # 从 dash 数据中获取质量信息
+                download_url_data = await v.get_download_url(cid=cid)
+                logger.info(f"[视频API] 获取下载URL数据成功")
 
             qualities = []
             if 'dash' in download_url_data and download_url_data['dash']:
