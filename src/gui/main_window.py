@@ -749,13 +749,16 @@ class MainWindow(AsyncTkApp):
         self.status_var.set("已开始所有任务")
 
     def _pause_all(self):
-        """暂停所有下载中任务"""
+        """暂停所有下载中或等待中的任务"""
         state = self.state_manager.get_state()
+        paused_count = 0
         for task in state.download_tasks:
-            if task.status == TaskStatus.DOWNLOADING:
+            # 暂停下载中或等待中的任务
+            if task.status in [TaskStatus.DOWNLOADING, TaskStatus.PENDING]:
                 self.download_service.pause_download(task.task_id)
+                paused_count += 1
 
-        self.status_var.set("已暂停所有任务")
+        self.status_var.set(f"已暂停 {paused_count} 个任务")
 
     def _set_download_path(self):
         """设置下载路径"""

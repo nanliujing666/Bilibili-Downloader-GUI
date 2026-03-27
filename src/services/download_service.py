@@ -175,9 +175,14 @@ class DownloadService:
             logger.error(f"任务不存在: {task_id}")
             return
 
-        # 检查任务状态
-        if task.status not in [TaskStatus.PENDING, TaskStatus.PAUSED, TaskStatus.FAILED]:
+        # 检查任务状态 - PAUSED状态的任务不应该被处理（已被用户暂停）
+        if task.status not in [TaskStatus.PENDING, TaskStatus.FAILED]:
             logger.info(f"任务 {task_id} 状态为 {task.status}，跳过")
+            return
+
+        # 检查是否已被暂停（_active_downloads被设为False）
+        if not self._active_downloads.get(task_id, True):
+            logger.info(f"任务 {task_id} 已被暂停，跳过处理")
             return
 
         # 检查FFmpeg
@@ -201,11 +206,22 @@ class DownloadService:
         try:
             await self._do_download(task)
         except Exception as e:
-            logger.error(f"下载失败 {task_id}: {e}")
-            self.state_manager.update(
-                lambda s: s.update_task(task_id, status=TaskStatus.FAILED, error_message=str(e))
-            )
-            self.event_bus.publish('download.error', {'task_id': task_id, 'error': str(e)})
+            # 检查任务是否被暂停（暂停后状态为PAUSED，不应该显示失败）
+            current_state = self.state_manager.get_state()
+            current_task = None
+            for t in current_state.download_tasks:
+                if t.task_id == task_id:
+                    current_task = t
+                    break
+
+            if current_task and current_task.status == TaskStatus.PAUSED:
+                logger.info(f"任务 {task_id} 已暂停，不显示失败")
+            else:
+                logger.error(f"下载失败 {task_id}: {e}")
+                self.state_manager.update(
+                    lambda s: s.update_task(task_id, status=TaskStatus.FAILED, error_message=str(e))
+                )
+                self.event_bus.publish('download.error', {'task_id': task_id, 'error': str(e)})
         finally:
             self._active_downloads.pop(task_id, None)
             self._progress.pop(task_id, None)
@@ -544,7 +560,29 @@ class DownloadService:
         del self._temp_files[task_id]
 
     def pause_download(self, task_id: str) -> None:
-        """暂停下载（实际上标记为取消，下次可以重新开始）"""
+        """暂停下载（只有下载中或等待中的任务才能被暂停）"""
+        # 检查任务状态，只有PENDING或DOWNLOADING状态才能暂停
+        state = self.state_manager.get_state()
+        task = None
+        for t in state.download_tasks:
+            if t.task_id == task_id:
+                task = t
+                break
+
+        if task is None:
+            logger.warning(f"暂停失败，任务不存在: {task_id}")
+            return
+
+        # 已完成的任务不能被暂停
+        if task.status == TaskStatus.COMPLETED:
+            logger.info(f"任务 {task_id} 已完成，跳过暂停")
+            return
+
+        # 只有特定状态的任务才能被暂停
+        if task.status not in [TaskStatus.PENDING, TaskStatus.DOWNLOADING]:
+            logger.info(f"任务 {task_id} 状态为 {task.status}，不能被暂停")
+            return
+
         self._active_downloads[task_id] = False
         self.state_manager.update(
             lambda s: s.update_task(task_id, status=TaskStatus.PAUSED)
