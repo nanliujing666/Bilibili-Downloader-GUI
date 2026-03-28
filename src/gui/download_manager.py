@@ -277,6 +277,13 @@ class DownloadManager:
 
     def _get_source_text(self, task: DownloadTask) -> str:
         """获取来源显示文本"""
+        if task.source == 'favorite' and task.source_name:
+            return f"收藏夹/{task.source_name}"
+        elif task.source == 'cheese' and task.source_name:
+            return f"课程/{task.source_name}"
+        elif task.source == 'watch_later':
+            return '稍后再看'
+
         source_map = {
             'url': '直接',
             'favorite': '收藏夹',
