@@ -62,6 +62,19 @@ logs/
 # Claude IDE
 .claude/
 
+# Package prompt
+PACKAGE_PROMPT.md
+
+# Config files (runtime generated)
+config/
+
+# PyInstaller spec file (can be regenerated)
+*.spec
+
+# Package outputs
+packages/
+releases/
+
 # FFmpeg (bundled) - Ignore all files but keep directory
 ffm/*
 !ffm/.gitkeep

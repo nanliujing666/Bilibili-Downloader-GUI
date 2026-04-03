@@ -92,10 +92,10 @@ class Settings:
     
     @classmethod
     def get_default_path(cls) -> str:
-        """获取默认配置文件路径"""
-        # 在用户目录下创建配置文件夹
-        home_dir = Path.home()
-        config_dir = home_dir / '.bilibili_downloader'
+        """获取默认配置文件路径（项目内）"""
+        # 获取项目根目录（src/config 的上级目录）
+        project_root = Path(__file__).parent.parent.parent
+        config_dir = project_root / 'config'
         config_dir.mkdir(exist_ok=True)
         return str(config_dir / 'config.json')
 

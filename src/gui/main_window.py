@@ -81,6 +81,9 @@ class MainWindow(AsyncTkApp):
         settings = get_settings()
         self._pending_max_concurrent = settings.max_concurrent
 
+        # 首次启动检查下载路径
+        self._check_download_path_on_startup()
+
         # 登录状态
         self.is_logged_in = False
         self.user_info: Optional[dict] = None
@@ -96,6 +99,60 @@ class MainWindow(AsyncTkApp):
 
         # 应用保存的最大并发数设置
         self.run_async(self.download_service.set_max_concurrent(self._pending_max_concurrent))
+
+    def _check_download_path_on_startup(self):
+        """首次启动时检查下载路径，路径不存在则提示用户选择"""
+        from ..config.settings import get_settings, save_settings
+        import os
+        from tkinter import messagebox, filedialog
+
+        settings = get_settings()
+
+        # 检查路径是否有效（存在且可写）
+        path_valid = False
+        if settings.download_path:
+            # 处理相对路径
+            if settings.download_path.startswith('./'):
+                abs_path = os.path.join(os.getcwd(), settings.download_path[2:])
+            else:
+                abs_path = settings.download_path
+
+            # 检查路径是否存在且是目录
+            if os.path.exists(abs_path) and os.path.isdir(abs_path):
+                # 检查是否可写
+                try:
+                    test_file = os.path.join(abs_path, '.write_test')
+                    with open(test_file, 'w') as f:
+                        f.write('test')
+                    os.remove(test_file)
+                    path_valid = True
+                except:
+                    path_valid = False
+
+        if not path_valid:
+            # 路径无效，提示用户选择
+            messagebox.showinfo(
+                "设置下载路径",
+                f"下载路径无效或不存在:\n{settings.download_path}\n\n"
+                "请选择有效的下载文件夹。"
+            )
+
+            path = filedialog.askdirectory(
+                title="选择下载目录",
+                mustexist=True
+            )
+
+            if path:
+                settings.download_path = path
+                save_settings(settings)
+                logger.info(f"用户设置下载路径: {path}")
+            else:
+                # 用户取消，使用程序目录下的 downloads 文件夹
+                default_path = os.path.join(os.getcwd(), "downloads")
+                settings.download_path = default_path
+                save_settings(settings)
+                os.makedirs(default_path, exist_ok=True)
+                logger.info(f"使用默认下载路径: {default_path}")
 
     def _build_ui(self):
         """构建UI"""

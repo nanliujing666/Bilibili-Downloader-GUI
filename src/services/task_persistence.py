@@ -31,9 +31,10 @@ class TaskPersistenceService:
         self._file_path = self._get_default_path()
 
     def _get_default_path(self) -> str:
-        """获取默认任务文件路径"""
-        home_dir = Path.home()
-        config_dir = home_dir / '.bilibili_downloader'
+        """获取默认任务文件路径（项目内）"""
+        # 获取项目根目录（src/services 的上上级目录）
+        project_root = Path(__file__).parent.parent.parent
+        config_dir = project_root / 'config'
         config_dir.mkdir(exist_ok=True)
         return str(config_dir / 'download_tasks.json')
 

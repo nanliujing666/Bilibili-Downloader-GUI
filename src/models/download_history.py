@@ -99,10 +99,11 @@ class DownloadHistory:
         self._load()
 
     def _get_default_path(self) -> str:
-        """获取默认历史文件路径"""
+        """获取默认历史文件路径（项目内）"""
         from pathlib import Path
-        home_dir = Path.home()
-        config_dir = home_dir / '.bilibili_downloader'
+        # 获取项目根目录（src/models 的上上级目录）
+        project_root = Path(__file__).parent.parent.parent
+        config_dir = project_root / 'config'
         config_dir.mkdir(exist_ok=True)
         return str(config_dir / 'download_history.json')
 
