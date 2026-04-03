@@ -39,9 +39,11 @@ class TaskPersistenceService:
 
     def _task_to_dict(self, task: DownloadTask) -> dict:
         """将任务转换为字典"""
-        return {
-            'task_id': task.task_id,
-            'video': {
+        # 处理延迟解析的任务（video为None）
+        if task.video is None:
+            video_data = None
+        else:
+            video_data = {
                 'bvid': task.video.bvid,
                 'cid': task.video.cid,
                 'aid': task.video.aid,
@@ -61,7 +63,11 @@ class TaskPersistenceService:
                 ],
                 'video_type': task.video.video_type.value if isinstance(task.video.video_type, VideoType) else task.video.video_type,
                 'cover_url': task.video.cover_url,
-            },
+            }
+
+        return {
+            'task_id': task.task_id,
+            'video': video_data,
             'status': task.status.value if isinstance(task.status, TaskStatus) else task.status,
             'progress': task.progress,
             'download_path': task.download_path,
@@ -76,6 +82,7 @@ class TaskPersistenceService:
             'source': task.source,
             'source_name': task.source_name,
             'source_id': task.source_id,
+            'url': getattr(task, 'url', ''),  # 保存URL用于延迟解析
             'created_at': task.created_at.isoformat() if task.created_at else None,
             'completed_at': task.completed_at.isoformat() if task.completed_at else None,
             'error_message': task.error_message,
@@ -87,37 +94,40 @@ class TaskPersistenceService:
     def _dict_to_task(self, data: dict) -> Optional[DownloadTask]:
         """从字典恢复任务"""
         try:
-            video_data = data.get('video', {})
+            video_data = data.get('video')
 
-            # 恢复视频页面信息
-            pages = [
-                VideoPage(
-                    cid=p['cid'],
-                    page=p['page'],
-                    title=p['title'],
-                    duration=p.get('duration', 0),
-                    part=p.get('part', ''),
+            # 恢复视频信息（支持延迟解析的任务）
+            if video_data is None:
+                video = None
+            else:
+                # 恢复视频页面信息
+                pages = [
+                    VideoPage(
+                        cid=p['cid'],
+                        page=p['page'],
+                        title=p['title'],
+                        duration=p.get('duration', 0),
+                        part=p.get('part', ''),
+                    )
+                    for p in video_data.get('pages', [])
+                ]
+
+                video = VideoInfo(
+                    bvid=video_data.get('bvid', ''),
+                    cid=video_data.get('cid', 0),
+                    aid=video_data.get('aid', 0),
+                    title=video_data.get('title', '未知标题'),
+                    description=video_data.get('description', ''),
+                    duration=video_data.get('duration', 0),
+                    owner=video_data.get('owner', {}),
+                    pages=pages,
+                    video_type=VideoType(video_data.get('video_type', 1)),
+                    cover_url=video_data.get('cover_url', ''),
+                    pub_date=None,
+                    stat={},
+                    is_charge=False,
+                    qualities=[],
                 )
-                for p in video_data.get('pages', [])
-            ]
-
-            # 恢复视频信息
-            video = VideoInfo(
-                bvid=video_data.get('bvid', ''),
-                cid=video_data.get('cid', 0),
-                aid=video_data.get('aid', 0),
-                title=video_data.get('title', '未知标题'),
-                description=video_data.get('description', ''),
-                duration=video_data.get('duration', 0),
-                owner=video_data.get('owner', {}),
-                pages=pages,
-                video_type=VideoType(video_data.get('video_type', 1)),
-                cover_url=video_data.get('cover_url', ''),
-                pub_date=None,
-                stat={},
-                is_charge=False,
-                qualities=[],
-            )
 
             # 解析状态
             status_value = data.get('status', 'pending')
@@ -167,6 +177,7 @@ class TaskPersistenceService:
                 download_subtitle=data.get('download_subtitle', False),
                 download_cover=data.get('download_cover', False),
                 source=data.get('source', 'url'),
+                url=data.get('url', ''),
                 source_name=data.get('source_name'),
                 source_id=data.get('source_id'),
                 created_at=created_at,

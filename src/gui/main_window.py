@@ -612,7 +612,7 @@ class MainWindow(AsyncTkApp):
     async def _batch_create_tasks(self, videos, source: str, source_name: str, source_id: str):
         """批量创建任务（轻量级，不解析视频信息，批量添加避免卡顿）
 
-        创建任务时只保存URL，视频解析延迟到下载时进行
+        创建任务时只保存URL，视频解析延迟到下载时进行，自动跳过重复任务
         """
         from ..models.download import DownloadTask, TaskStatus
         from ..utils.path_utils import sanitize_filename
@@ -624,6 +624,7 @@ class MainWindow(AsyncTkApp):
         state_manager = get_state_manager()
         total = len(videos)
         created = 0
+        skipped = 0
         failed = 0
 
         self.status_var.set(f"正在创建 {source_name} 的任务 (0/{total})...")
@@ -642,6 +643,13 @@ class MainWindow(AsyncTkApp):
                     video_title = getattr(video, 'title', str(video.aid))
                 else:
                     failed += 1
+                    continue
+
+                # 检查重复任务
+                existing_task = self.download_service._is_duplicate_task(url, source, source_name)
+                if existing_task:
+                    skipped += 1
+                    task_ids.append(existing_task.task_id)  # 使用已有任务
                     continue
 
                 # 生成下载路径
@@ -703,7 +711,12 @@ class MainWindow(AsyncTkApp):
         })
 
         # 完成提示
-        self.status_var.set(f"已创建 {created} 个任务" + (f"，{failed} 个失败" if failed > 0 else ""))
+        status_text = f"已创建 {created} 个任务"
+        if skipped > 0:
+            status_text += f"，跳过 {skipped} 个重复"
+        if failed > 0:
+            status_text += f"，{failed} 个失败"
+        self.status_var.set(status_text)
 
         # 批量开始下载（带延迟）
         for i, task_id in enumerate(task_ids):
@@ -712,7 +725,7 @@ class MainWindow(AsyncTkApp):
                 await asyncio.sleep(0.1)
 
     async def _batch_create_cheese_tasks_async(self, episodes, course_title: str):
-        """异步批量创建课程任务，批量添加避免UI卡顿"""
+        """异步批量创建课程任务，批量添加避免UI卡顿，自动跳过重复"""
         from ..config.settings import get_settings
         from ..models.download import DownloadTask, TaskStatus
         from ..core.state_manager import get_state_manager
@@ -724,6 +737,7 @@ class MainWindow(AsyncTkApp):
         state_manager = get_state_manager()
         total = len(episodes)
         created = 0
+        skipped = 0
         failed = 0
 
         self.root.after(0, lambda: self.status_var.set(f"正在创建课程「{course_title}」的任务 (0/{total})..."))
@@ -739,6 +753,19 @@ class MainWindow(AsyncTkApp):
 
         for video in episodes:
             try:
+                # 构建视频URL用于重复检测
+                if hasattr(video, 'bvid') and video.bvid:
+                    url = f"https://www.bilibili.com/video/{video.bvid}"
+                else:
+                    url = ""
+
+                # 检查重复任务（课程使用cheese source + course_title）
+                existing_task = self.download_service._is_duplicate_task(url, "cheese", course_title)
+                if existing_task:
+                    skipped += 1
+                    task_ids.append(existing_task.task_id)  # 使用已有任务
+                    continue
+
                 # 生成文件名
                 safe_title = sanitize_filename(video.title)
                 output_path = os.path.join(course_path, f"{safe_title}.mp4")
@@ -763,6 +790,7 @@ class MainWindow(AsyncTkApp):
                     source="cheese",
                     source_name=course_title,
                     source_id=None,
+                    url=url,  # 保存URL用于重复检测
                 )
 
                 tasks_to_add.append(task)
@@ -774,8 +802,8 @@ class MainWindow(AsyncTkApp):
                 logger.error(f"创建课程任务失败: {e}")
 
             # 更新进度（不刷新UI，只更新状态栏）
-            if created % 50 == 0:
-                self.root.after(0, lambda c=created, t=total, ct=course_title:
+            if (created + skipped) % 50 == 0:
+                self.root.after(0, lambda c=created+skipped, t=total, ct=course_title:
                     self.status_var.set(f"正在准备课程「{ct}」的任务 ({c}/{t})..."))
 
         # 一次性批量添加所有任务到state_manager（不通知监听器）
@@ -796,8 +824,12 @@ class MainWindow(AsyncTkApp):
             'source_name': course_title
         })
 
-        self.root.after(0, lambda: self.status_var.set(
-            f"已创建课程「{course_title}」{created} 个任务" + (f"，{failed} 个失败" if failed > 0 else "")))
+        status_text = f"已创建课程「{course_title}」{created} 个任务"
+        if skipped > 0:
+            status_text += f"，跳过 {skipped} 个重复"
+        if failed > 0:
+            status_text += f"，{failed} 个失败"
+        self.root.after(0, lambda: self.status_var.set(status_text))
 
         # 批量开始下载（使用延迟启动，避免同时开始太多）
         for i, task_id in enumerate(task_ids):

@@ -220,18 +220,24 @@ class DownloadService:
             )
             try:
                 video_info = await self.parse_video(task.url)
-                # 设置下载路径
+                # 设置下载路径（如果任务已经有路径，则只更新视频信息）
                 from ..config.settings import get_settings
                 settings = get_settings()
-                safe_title = sanitize_filename(video_info.title)
-                output_path = os.path.join(settings.download_path, f"{safe_title}.mp4")
-                # 检查文件是否已存在
-                counter = 1
-                original_output_path = output_path
-                while os.path.exists(output_path):
-                    base, ext = os.path.splitext(original_output_path)
-                    output_path = f"{base}_{counter}{ext}"
-                    counter += 1
+                if task.download_path:
+                    # 任务已有路径，保持原路径
+                    output_path = task.download_path
+                    logger.info(f"任务 {task_id} 使用预设路径: {output_path}")
+                else:
+                    # 生成新路径
+                    safe_title = sanitize_filename(video_info.title)
+                    output_path = os.path.join(settings.download_path, f"{safe_title}.mp4")
+                    # 检查文件是否已存在
+                    counter = 1
+                    original_output_path = output_path
+                    while os.path.exists(output_path):
+                        base, ext = os.path.splitext(original_output_path)
+                        output_path = f"{base}_{counter}{ext}"
+                        counter += 1
                 # 更新任务信息
                 self.state_manager.update(
                     lambda s: s.update_task(
@@ -301,6 +307,12 @@ class DownloadService:
         """
         logger.info(f"[创建任务] URL: {url}, source: {source}")
 
+        # 检查重复下载
+        existing_task = self._is_duplicate_task(url, source, source_name)
+        if existing_task:
+            logger.info(f"检测到重复任务，跳过创建: {existing_task.task_id}")
+            return existing_task.task_id
+
         # 从URL提取BV号作为任务ID
         bvid = self._extract_bvid(url)
         task_id = bvid if bvid else str(uuid.uuid4())[:8]
@@ -324,6 +336,50 @@ class DownloadService:
 
         logger.info(f"创建下载任务: {task_id}, 来源: {source}")
         return task_id
+
+    def _is_duplicate_task(self, url: str, source: str,
+                          source_name: Optional[str] = None) -> Optional[DownloadTask]:
+        """检查是否存在重复任务
+
+        匹配条件：相同来源 AND (相同URL OR 相同BV号)
+
+        Args:
+            url: 视频URL
+            source: 下载来源
+            source_name: 来源名称（用于更精确的匹配）
+
+        Returns:
+            如果存在重复任务返回该任务，否则返回None
+        """
+        state = self.state_manager.get_state()
+        url_bvid = self._extract_bvid(url)
+
+        for task in state.download_tasks:
+            # 首先检查来源是否相同
+            if task.source != source:
+                continue
+
+            # 检查source_name是否匹配（如果提供）
+            if source_name and task.source_name != source_name:
+                continue
+
+            # 检查URL是否相同（优先）
+            task_url = getattr(task, 'url', '')
+            if task_url and task_url == url:
+                logger.info(f"重复检测: URL匹配 {url}")
+                return task
+
+            # 检查BV号是否相同（从URL提取）
+            if url_bvid and task.video and task.video.bvid == url_bvid:
+                logger.info(f"重复检测: BV号匹配 {url_bvid}")
+                return task
+
+            # 如果任务还没有video信息，检查task_id（BV号）
+            if url_bvid and task.task_id == url_bvid:
+                logger.info(f"重复检测: TaskID匹配BV号 {url_bvid}")
+                return task
+
+        return None
 
     def _extract_bvid(self, url: str) -> Optional[str]:
         """从URL中提取BV号"""
