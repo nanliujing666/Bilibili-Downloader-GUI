@@ -58,6 +58,11 @@ class AppState:
         """添加新任务"""
         new_tasks = self.download_tasks + (task,)
         return replace(self, download_tasks=new_tasks)
+
+    def with_tasks(self, tasks: list) -> 'AppState':
+        """批量添加多个任务"""
+        new_tasks = self.download_tasks + tuple(tasks)
+        return replace(self, download_tasks=new_tasks)
     
     def update_task(self, task_id: str, **kwargs) -> 'AppState':
         """更新任务状态"""
@@ -121,12 +126,14 @@ class StateManager:
     def __init__(self):
         if self._initialized:
             return
-        
+
         self._initialized = True
         self._state = AppState()
         self._listeners: List[StateListener] = []
         self._listeners_lock = threading.RLock()
         self._state_lock = threading.RLock()
+        self._notification_suppressed = False
+        self._notification_lock = threading.RLock()
     
     def get_state(self) -> AppState:
         """
@@ -184,6 +191,58 @@ class StateManager:
                 pass
 
         return new_state
+
+    def bulk_update(self, updater: Callable[[AppState], AppState],
+                    save: bool = True,
+                    notify: bool = True) -> AppState:
+        """
+        批量更新状态，可选择是否通知监听器
+
+        Args:
+            updater: 接收当前状态，返回新状态的函数
+            save: 是否保存到文件
+            notify: 是否通知监听器（批量操作时设为False，最后统一通知）
+
+        Returns:
+            新状态
+        """
+        with self._state_lock:
+            old_state = self._state
+            new_state = updater(old_state)
+            self._state = new_state
+
+        # 通知监听器（如果启用）
+        if notify:
+            self._notify_listeners(new_state, old_state)
+
+            # 保存任务到文件（只在任务数量变化时记录日志）
+            if save:
+                try:
+                    persistence = _get_task_persistence()
+                    old_count = len(old_state.download_tasks)
+                    new_count = len(new_state.download_tasks)
+                    persistence.save_tasks(list(new_state.download_tasks))
+                    # 只在任务数量变化时记录日志
+                    if old_count != new_count:
+                        logger.info(f"任务列表已更新: {old_count} -> {new_count}")
+                except Exception:
+                    pass
+        else:
+            # 即使不通知，也保存到文件
+            if save:
+                try:
+                    persistence = _get_task_persistence()
+                    persistence.save_tasks(list(new_state.download_tasks))
+                except Exception:
+                    pass
+
+        return new_state
+
+    def notify_listeners(self) -> None:
+        """手动触发监听器通知（用于批量操作后统一刷新UI）"""
+        with self._state_lock:
+            current_state = self._state
+        self._notify_listeners(current_state, current_state)
 
     def load_tasks(self) -> None:
         """从文件加载任务"""

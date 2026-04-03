@@ -25,6 +25,8 @@ from ..core.event_bus import get_event_bus
 logger = logging.getLogger(__name__)
 
 
+import time
+
 @dataclass
 class DownloadProgress:
     """下载进度跟踪"""
@@ -34,6 +36,7 @@ class DownloadProgress:
     audio_downloaded: int = 0
     merging: bool = False
     merge_progress: float = 0.0
+    last_update_time: float = field(default_factory=time.time)
 
     @property
     def total_progress(self) -> float:
@@ -209,6 +212,48 @@ class DownloadService:
             self.event_bus.publish('download.error', {'task_id': task_id, 'error': error_msg})
             return
 
+        # 延迟解析：如果视频信息为空，先解析
+        if task.video is None:
+            logger.info(f"任务 {task_id} 需要解析视频信息")
+            self.state_manager.update(
+                lambda s: s.update_task(task_id, status=TaskStatus.PARSING)
+            )
+            try:
+                video_info = await self.parse_video(task.url)
+                # 设置下载路径
+                from ..config.settings import get_settings
+                settings = get_settings()
+                safe_title = sanitize_filename(video_info.title)
+                output_path = os.path.join(settings.download_path, f"{safe_title}.mp4")
+                # 检查文件是否已存在
+                counter = 1
+                original_output_path = output_path
+                while os.path.exists(output_path):
+                    base, ext = os.path.splitext(original_output_path)
+                    output_path = f"{base}_{counter}{ext}"
+                    counter += 1
+                # 更新任务信息
+                self.state_manager.update(
+                    lambda s: s.update_task(
+                        task_id,
+                        video=video_info,
+                        download_path=output_path
+                    )
+                )
+                # 重新获取更新后的任务
+                state = self.state_manager.get_state()
+                for t in state.download_tasks:
+                    if t.task_id == task_id:
+                        task = t
+                        break
+            except Exception as e:
+                logger.error(f"解析视频失败 {task_id}: {e}")
+                self.state_manager.update(
+                    lambda s: s.update_task(task_id, status=TaskStatus.FAILED, error_message=str(e))
+                )
+                self.event_bus.publish('download.error', {'task_id': task_id, 'error': str(e)})
+                return
+
         # 开始下载
         self.state_manager.update(
             lambda s: s.update_task(task_id, status=TaskStatus.DOWNLOADING)
@@ -250,36 +295,28 @@ class DownloadService:
                                    source: str = "url",
                                    source_name: Optional[str] = None,
                                    source_id: Optional[str] = None) -> str:
-        """创建下载任务"""
-        logger.info(f"[创建任务] URL: {url}, 请求质量: {quality}, source: {source}")
-        video_info = await self.parse_video(url)
-        task_id = str(uuid.uuid4())[:8]
+        """创建下载任务（轻量级，不解析视频信息）
 
-        from ..config.settings import get_settings
-        settings = get_settings()
-        download_path = settings.download_path
+        视频解析延迟到开始下载时进行，避免创建任务时卡顿
+        """
+        logger.info(f"[创建任务] URL: {url}, source: {source}")
 
-        safe_title = sanitize_filename(video_info.title)
-        output_path = os.path.join(download_path, f"{safe_title}.mp4")
+        # 从URL提取BV号作为任务ID
+        bvid = self._extract_bvid(url)
+        task_id = bvid if bvid else str(uuid.uuid4())[:8]
 
-        # 检查文件是否已存在，避免覆盖
-        counter = 1
-        original_output_path = output_path
-        while os.path.exists(output_path):
-            base, ext = os.path.splitext(original_output_path)
-            output_path = f"{base}_{counter}{ext}"
-            counter += 1
-
+        # 创建轻量级任务，不解析视频信息
         task = DownloadTask(
             task_id=task_id,
-            video=video_info,
+            video=None,  # 延迟加载
             status=TaskStatus.PENDING,
             progress=0.0,
-            download_path=output_path,
+            download_path="",  # 延迟设置
             quality=quality,
             source=source,
             source_name=source_name,
             source_id=source_id,
+            url=url,  # 保存URL用于后续解析
         )
 
         self.state_manager.update(lambda s: s.with_task(task))
@@ -287,6 +324,15 @@ class DownloadService:
 
         logger.info(f"创建下载任务: {task_id}, 来源: {source}")
         return task_id
+
+    def _extract_bvid(self, url: str) -> Optional[str]:
+        """从URL中提取BV号"""
+        import re
+        # 匹配BV号 (如 BV1xx411c7mD)
+        match = re.search(r'BV[a-zA-Z0-9]{10}', url)
+        if match:
+            return match.group(0)
+        return None
 
     async def start_download(self, task_id: str) -> None:
         """开始下载 - 将任务添加到队列"""
@@ -323,7 +369,7 @@ class DownloadService:
         )
 
     async def _do_download(self, task: DownloadTask) -> None:
-        """执行完整下载流程"""
+        """执行完整下载流程（带重试机制）"""
         task_id = task.task_id
         logger.info(f"开始下载任务 {task_id}: {task.video.title}")
 
@@ -359,17 +405,6 @@ class DownloadService:
         else:
             logger.info(f"[{task_id}] 使用任务设置的质量: {quality}")
 
-        # 1. 获取下载URL
-        try:
-            download_info = await self.video_api.get_download_url(
-                task.video.bvid, cid, quality
-            )
-            video_url = download_info['video_url']
-            audio_url = download_info['audio_url']
-            logger.info(f"获取到下载链接 - 视频: {video_url[:50]}..., 音频: {audio_url[:50]}...")
-        except Exception as e:
-            raise RuntimeError(f"获取下载链接失败: {e}")
-
         # 创建临时目录
         temp_dir = os.path.join(os.path.dirname(task.download_path), ".temp")
         ensure_dir(temp_dir)
@@ -378,21 +413,25 @@ class DownloadService:
         audio_temp = os.path.join(temp_dir, f"{task_id}_audio.m4s")
         self._temp_files[task_id] = (video_temp, audio_temp)
 
-        # 2. 下载视频流 (占70%进度)
+        # 下载视频流（带重试，用户无感知）
         logger.info(f"[{task_id}] 开始下载视频流...")
-        video_success = await self._download_stream(
-            task_id, video_url, video_temp, 'video'
+        video_success = await self._download_stream_with_retry(
+            task_id, task.video.bvid, cid, quality, video_temp, 'video'
         )
         if not video_success:
-            raise RuntimeError("视频流下载失败或被取消")
+            if not self._active_downloads.get(task_id, True):
+                raise RuntimeError("下载已取消")
+            raise RuntimeError("网络连接失败，请检查网络后重新开始下载")
 
-        # 3. 下载音频流 (占20%进度)
+        # 下载音频流（带重试，用户无感知）
         logger.info(f"[{task_id}] 开始下载音频流...")
-        audio_success = await self._download_stream(
-            task_id, audio_url, audio_temp, 'audio'
+        audio_success = await self._download_stream_with_retry(
+            task_id, task.video.bvid, cid, quality, audio_temp, 'audio'
         )
         if not audio_success:
-            raise RuntimeError("音频流下载失败或被取消")
+            if not self._active_downloads.get(task_id, True):
+                raise RuntimeError("下载已取消")
+            raise RuntimeError("网络连接失败，请检查网络后重新开始下载")
 
         # 4. 合并音视频 (占10%进度)
         logger.info(f"[{task_id}] 开始合并音视频...")
@@ -477,6 +516,71 @@ class DownloadService:
         except Exception as e:
             logger.error(f"保存下载历史失败: {e}")
 
+    async def _download_stream_with_retry(
+        self,
+        task_id: str,
+        bvid: str,
+        cid: int,
+        quality: int,
+        output_path: str,
+        stream_type: str,
+        max_retries: int = 5
+    ) -> bool:
+        """下载单个流（带重试和链接刷新，用户无感知）
+
+        Args:
+            task_id: 任务ID
+            bvid: 视频BV号
+            cid: 视频CID
+            quality: 视频质量
+            output_path: 输出路径
+            stream_type: 'video' 或 'audio'
+            max_retries: 最大重试次数（默认5次）
+
+        Returns:
+            是否成功完成下载
+        """
+        for attempt in range(max_retries):
+            # 检查是否被取消
+            if not self._active_downloads.get(task_id, True):
+                logger.info(f"[{task_id}] 下载已取消，停止重试")
+                return False
+
+            # 获取（或重新获取）下载链接
+            try:
+                download_info = await self.video_api.get_download_url(bvid, cid, quality)
+                url = download_info['video_url'] if stream_type == 'video' else download_info['audio_url']
+                if attempt > 0:
+                    logger.info(f"[{task_id}] 重新获取{stream_type}下载链接 (第{attempt + 1}次尝试)")
+            except Exception as e:
+                logger.warning(f"[{task_id}] 获取下载链接失败 (尝试 {attempt + 1}/{max_retries}): {e}")
+                if attempt < max_retries - 1:
+                    wait_time = min(2 ** attempt, 10)  # 指数退避，最大10秒
+                    await asyncio.sleep(wait_time)
+                    continue
+                return False
+
+            # 尝试下载
+            success = await self._download_stream(task_id, url, output_path, stream_type)
+            if success:
+                if attempt > 0:
+                    logger.info(f"[{task_id}] {stream_type}下载在第{attempt + 1}次尝试后成功")
+                return True
+
+            # 下载失败，检查是否被取消
+            if not self._active_downloads.get(task_id, True):
+                logger.info(f"[{task_id}] 下载已取消，停止重试")
+                return False
+
+            # 下载失败，等待后重试（用户无感知，只记录日志）
+            if attempt < max_retries - 1:
+                wait_time = min(2 ** attempt, 10)  # 指数退避：1s, 2s, 4s, 8s, 10s
+                logger.info(f"[{task_id}] {stream_type}下载遇到问题，{wait_time}秒后自动重试...")
+                await asyncio.sleep(wait_time)
+
+        logger.error(f"[{task_id}] {stream_type}下载失败，已重试{max_retries}次，请检查网络连接")
+        return False
+
     async def _download_stream(
         self,
         task_id: str,
@@ -506,8 +610,26 @@ class DownloadService:
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
         }
 
+        # 优化 aiohttp 配置
+        timeout = aiohttp.ClientTimeout(
+            total=None,  # 总超时无限制（大文件）
+            connect=30,  # 连接超时30秒
+            sock_read=60  # 读取超时60秒
+        )
+
+        # TCP连接配置优化
+        connector = aiohttp.TCPConnector(
+            limit=10,  # 连接池大小
+            limit_per_host=5,  # 每个主机最大连接数
+            enable_cleanup_closed=True,
+            force_close=False,
+        )
+
         try:
-            async with aiohttp.ClientSession() as session:
+            async with aiohttp.ClientSession(
+                connector=connector,
+                timeout=timeout
+            ) as session:
                 async with session.get(url, headers=headers) as response:
                     if response.status != 200:
                         logger.error(f"下载失败，HTTP状态码: {response.status}")
@@ -523,7 +645,9 @@ class DownloadService:
 
                     # 下载文件
                     downloaded = 0
-                    chunk_size = 8192
+                    chunk_size = 65536  # 64KB chunks for better throughput
+                    last_progress_update = 0
+                    progress_update_interval = 524288  # 每512KB更新一次进度
 
                     async with aiofiles.open(output_path, 'wb') as f:
                         async for chunk in response.content.iter_chunked(chunk_size):
@@ -535,14 +659,28 @@ class DownloadService:
                             await f.write(chunk)
                             downloaded += len(chunk)
 
-                            # 更新进度
-                            if stream_type == 'video':
-                                self._progress[task_id].video_downloaded = downloaded
-                            else:
-                                self._progress[task_id].audio_downloaded = downloaded
+                            # 更新进度（限制频率，避免UI卡顿）
+                            if downloaded - last_progress_update >= progress_update_interval:
+                                if stream_type == 'video':
+                                    self._progress[task_id].video_downloaded = downloaded
+                                else:
+                                    self._progress[task_id].audio_downloaded = downloaded
+                                self._update_task_progress(task_id)
+                                last_progress_update = downloaded
 
-                            self._update_task_progress(task_id)
+                        # 最后更新一次确保进度完整
+                        if stream_type == 'video':
+                            self._progress[task_id].video_downloaded = downloaded
+                        else:
+                            self._progress[task_id].audio_downloaded = downloaded
+                        self._update_task_progress(task_id)
 
+        except asyncio.TimeoutError:
+            logger.error(f"[{task_id}] 下载超时")
+            return False
+        except aiohttp.ClientError as e:
+            logger.error(f"[{task_id}] 网络错误: {e}")
+            return False
         except Exception as e:
             logger.error(f"[{task_id}] 下载流失败: {e}")
             return False
@@ -550,11 +688,18 @@ class DownloadService:
         return True
 
     def _update_task_progress(self, task_id: str) -> None:
-        """更新任务进度到状态管理器"""
+        """更新任务进度到状态管理器（带频率限制）"""
         if task_id not in self._progress:
             return
 
         progress = self._progress[task_id].total_progress
+
+        # 限制更新频率，每200ms最多更新一次
+        current_time = time.time()
+        if current_time - self._progress[task_id].last_update_time < 0.2:
+            return
+
+        self._progress[task_id].last_update_time = current_time
         self.state_manager.update(
             lambda s: s.update_task(task_id, progress=progress)
         )

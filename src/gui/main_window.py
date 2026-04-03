@@ -591,28 +591,10 @@ class MainWindow(AsyncTkApp):
             messagebox.showinfo("提示", "列表为空")
             return
 
-        # 批量创建下载任务
-        quality = self.quality_var.get()
-        for video in videos:
-            try:
-                if hasattr(video, 'bvid') and video.bvid:
-                    url = f"https://www.bilibili.com/video/{video.bvid}"
-                elif hasattr(video, 'aid') and video.aid:
-                    url = f"https://www.bilibili.com/video/av{video.aid}"
-                else:
-                    logger.warning(f"视频缺少bvid/aid，跳过: {video}")
-                    continue
-
-                self.run_async(self._create_download_task(
-                    url, quality,
-                    source="watch_later",
-                    source_name=source_name,
-                    source_id=source_id
-                ))
-            except Exception as e:
-                logger.error(f"创建稍后再看视频任务失败: {e}")
-
-        self.status_var.set(f"已从稍后再看创建 {count} 个下载任务")
+        # 批量创建任务（轻量级，不卡顿）
+        self.run_async(self._batch_create_tasks(
+            videos, "watch_later", source_name, source_id
+        ))
 
     def _on_favorite_selected(self, videos, favorite_name: str, favorite_id: str):
         """收藏夹选择回调"""
@@ -622,27 +604,211 @@ class MainWindow(AsyncTkApp):
             return
 
         if messagebox.askyesno("确认", f"收藏夹共有 {count} 个视频，是否开始下载？"):
-            # 批量创建下载任务
-            quality = self.quality_var.get()
-            for video in videos:
-                try:
-                    if hasattr(video, 'bvid') and video.bvid:
-                        url = f"https://www.bilibili.com/video/{video.bvid}"
-                    elif hasattr(video, 'aid') and video.aid:
-                        url = f"https://www.bilibili.com/video/av{video.aid}"
-                    else:
-                        continue
+            # 批量创建任务（轻量级，不卡顿）
+            self.run_async(self._batch_create_tasks(
+                videos, "favorite", favorite_name, favorite_id
+            ))
 
-                    self.run_async(self._create_download_task(
-                        url, quality,
-                        source="favorite",
-                        source_name=favorite_name,
-                        source_id=favorite_id
-                    ))
-                except Exception as e:
-                    logger.error(f"创建收藏夹视频任务失败: {e}")
+    async def _batch_create_tasks(self, videos, source: str, source_name: str, source_id: str):
+        """批量创建任务（轻量级，不解析视频信息，批量添加避免卡顿）
 
-            self.status_var.set(f"已创建 {count} 个下载任务")
+        创建任务时只保存URL，视频解析延迟到下载时进行
+        """
+        from ..models.download import DownloadTask, TaskStatus
+        from ..utils.path_utils import sanitize_filename
+        import uuid
+        import os
+
+        quality = self.quality_var.get()
+        settings = get_settings()
+        state_manager = get_state_manager()
+        total = len(videos)
+        created = 0
+        failed = 0
+
+        self.status_var.set(f"正在创建 {source_name} 的任务 (0/{total})...")
+
+        # 先收集所有任务
+        tasks_to_add = []
+        task_ids = []
+
+        for video in videos:
+            try:
+                if hasattr(video, 'bvid') and video.bvid:
+                    url = f"https://www.bilibili.com/video/{video.bvid}"
+                    video_title = getattr(video, 'title', video.bvid)
+                elif hasattr(video, 'aid') and video.aid:
+                    url = f"https://www.bilibili.com/video/av{video.aid}"
+                    video_title = getattr(video, 'title', str(video.aid))
+                else:
+                    failed += 1
+                    continue
+
+                # 生成下载路径
+                safe_title = sanitize_filename(video_title)[:50]
+                output_path = os.path.join(settings.download_path, f"{safe_title}.mp4")
+
+                # 检查文件是否已存在
+                counter = 1
+                original_output_path = output_path
+                while os.path.exists(output_path):
+                    base, ext = os.path.splitext(original_output_path)
+                    output_path = f"{base}_{counter}{ext}"
+                    counter += 1
+
+                # 创建任务（延迟解析，video=None）
+                task_id = str(uuid.uuid4())[:8]
+                task = DownloadTask(
+                    task_id=task_id,
+                    video=None,  # 延迟解析
+                    status=TaskStatus.PENDING,
+                    progress=0.0,
+                    download_path=output_path,
+                    quality=quality,
+                    source=source,
+                    source_name=source_name,
+                    source_id=source_id,
+                    url=url,  # 保存URL用于延迟解析
+                )
+
+                tasks_to_add.append(task)
+                task_ids.append(task_id)
+                created += 1
+
+                # 更新进度
+                if created % 50 == 0:
+                    self.root.after(0, lambda c=created, t=total, sn=source_name:
+                        self.status_var.set(f"正在准备 {sn} 的任务 ({c}/{t})..."))
+
+            except Exception as e:
+                failed += 1
+                logger.error(f"创建任务失败: {e}")
+
+        # 一次性批量添加所有任务（不通知监听器）
+        if tasks_to_add:
+            state_manager.bulk_update(
+                lambda s: s.with_tasks(tasks_to_add),
+                save=True,
+                notify=False
+            )
+
+        # 触发一次UI刷新
+        self.root.after(0, lambda: state_manager.notify_listeners())
+
+        # 发布批量创建事件
+        self.event_bus.publish('download.batch_created', {
+            'count': len(task_ids),
+            'source': source,
+            'source_name': source_name
+        })
+
+        # 完成提示
+        self.status_var.set(f"已创建 {created} 个任务" + (f"，{failed} 个失败" if failed > 0 else ""))
+
+        # 批量开始下载（带延迟）
+        for i, task_id in enumerate(task_ids):
+            self.run_async(self.download_service.start_download(task_id))
+            if (i + 1) % 10 == 0:
+                await asyncio.sleep(0.1)
+
+    async def _batch_create_cheese_tasks_async(self, episodes, course_title: str):
+        """异步批量创建课程任务，批量添加避免UI卡顿"""
+        from ..config.settings import get_settings
+        from ..models.download import DownloadTask, TaskStatus
+        from ..core.state_manager import get_state_manager
+        from ..utils.path_utils import sanitize_filename
+        import uuid
+
+        quality = self.quality_var.get()
+        settings = get_settings()
+        state_manager = get_state_manager()
+        total = len(episodes)
+        created = 0
+        failed = 0
+
+        self.root.after(0, lambda: self.status_var.set(f"正在创建课程「{course_title}」的任务 (0/{total})..."))
+
+        # 构建下载路径 - 使用课程名称作为子文件夹
+        safe_course = sanitize_filename(course_title)
+        course_path = os.path.join(settings.download_path, safe_course)
+        os.makedirs(course_path, exist_ok=True)
+
+        # 先收集所有任务，避免频繁UI更新
+        tasks_to_add = []
+        task_ids = []
+
+        for video in episodes:
+            try:
+                # 生成文件名
+                safe_title = sanitize_filename(video.title)
+                output_path = os.path.join(course_path, f"{safe_title}.mp4")
+
+                # 检查文件是否已存在
+                counter = 1
+                original_output_path = output_path
+                while os.path.exists(output_path):
+                    base, ext = os.path.splitext(original_output_path)
+                    output_path = f"{base}_{counter}{ext}"
+                    counter += 1
+
+                # 创建任务（不立即添加到state_manager）
+                task_id = str(uuid.uuid4())[:8]
+                task = DownloadTask(
+                    task_id=task_id,
+                    video=video,
+                    status=TaskStatus.PENDING,
+                    progress=0.0,
+                    download_path=output_path,
+                    quality=quality,
+                    source="cheese",
+                    source_name=course_title,
+                    source_id=None,
+                )
+
+                tasks_to_add.append(task)
+                task_ids.append(task_id)
+                created += 1
+
+            except Exception as e:
+                failed += 1
+                logger.error(f"创建课程任务失败: {e}")
+
+            # 更新进度（不刷新UI，只更新状态栏）
+            if created % 50 == 0:
+                self.root.after(0, lambda c=created, t=total, ct=course_title:
+                    self.status_var.set(f"正在准备课程「{ct}」的任务 ({c}/{t})..."))
+
+        # 一次性批量添加所有任务到state_manager（不通知监听器）
+        if tasks_to_add:
+            state_manager.bulk_update(
+                lambda s: s.with_tasks(tasks_to_add),
+                save=True,
+                notify=False
+            )
+
+        # 触发一次UI刷新
+        self.root.after(0, lambda: state_manager.notify_listeners())
+
+        # 发布批量创建事件
+        self.event_bus.publish('download.batch_created', {
+            'count': len(task_ids),
+            'source': 'cheese',
+            'source_name': course_title
+        })
+
+        self.root.after(0, lambda: self.status_var.set(
+            f"已创建课程「{course_title}」{created} 个任务" + (f"，{failed} 个失败" if failed > 0 else "")))
+
+        # 批量开始下载（使用延迟启动，避免同时开始太多）
+        for i, task_id in enumerate(task_ids):
+            self.run_async(self.download_service.start_download(task_id))
+            # 每10个任务稍微延迟一下，避免瞬间发起太多请求
+            if (i + 1) % 10 == 0:
+                await asyncio.sleep(0.1)
+
+    def _batch_create_cheese_tasks(self, episodes, course_title: str):
+        """批量创建课程任务（入口方法）"""
+        self.run_async(self._batch_create_cheese_tasks_async(episodes, course_title))
 
     def _on_cheese_selected(self, episodes, course_title):
         """课程选择回调"""
@@ -675,16 +841,8 @@ class MainWindow(AsyncTkApp):
             except Exception as e:
                 logger.error(f"记录课程历史失败: {e}")
 
-            # 批量创建下载任务
-            quality = self.quality_var.get()
-            for i, video in enumerate(episodes):
-                try:
-                    # 创建特殊的课程视频下载任务
-                    self.run_async(self._create_cheese_download_task(video, course_title, quality))
-                except Exception as e:
-                    logger.error(f"创建课程视频任务失败: {e}")
-
-            self.status_var.set(f"已创建课程「{course_title}」{count} 个下载任务")
+            # 批量创建课程任务（轻量级，不卡顿）
+            self._batch_create_cheese_tasks(episodes, course_title)
 
     async def _create_cheese_download_task(self, video, course_title: str, quality: Optional[int] = None):
         """创建课程视频下载任务"""
@@ -718,7 +876,7 @@ class MainWindow(AsyncTkApp):
                 output_path = f"{base}_{counter}{ext}"
                 counter += 1
 
-            # 创建任务，添加课程来源信息
+            # 创建任务，添加课程来源信息（只创建，不自动开始）
             task_id = str(uuid.uuid4())[:8]
             task = DownloadTask(
                 task_id=task_id,
@@ -737,8 +895,8 @@ class MainWindow(AsyncTkApp):
 
             self.root.after(0, lambda: self.status_var.set(f"课程任务创建成功: {task_id}"))
 
-            # 自动开始下载
-            await self.download_service.start_download(task_id)
+            # 不自动开始下载，让用户手动点击开始按钮
+            # await self.download_service.start_download(task_id)
 
         except Exception as e:
             logger.error(f"创建课程下载任务失败: {e}")

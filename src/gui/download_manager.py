@@ -137,6 +137,12 @@ class DownloadManager:
         self.tree.heading('path', text='保存路径')
         self.tree.column('path', width=180, anchor='w')
 
+        # 配置颜色标签（只需要配置一次）
+        self.tree.tag_configure('completed', foreground='green')
+        self.tree.tag_configure('missing', foreground='red')
+        self.tree.tag_configure('failed', foreground='red')
+        self.tree.tag_configure('downloading', foreground='blue')
+
         # 滚动条
         self.scrollbar = ttk.Scrollbar(
             list_frame,
@@ -180,11 +186,19 @@ class DownloadManager:
     def _setup_event_handlers(self):
         """设置事件处理器"""
         self.event_bus.subscribe('download.created', self._on_download_created)
+        self.event_bus.subscribe('download.batch_created', self._on_batch_created)
         self.event_bus.subscribe('download.completed', self._on_download_completed)
         self.event_bus.subscribe('download.error', self._on_download_error)
 
     def _on_download_created(self, data):
-        """下载创建事件"""
+        """单个下载创建事件"""
+        self._refresh_list()
+
+    def _on_batch_created(self, data):
+        """批量下载创建事件 - 只刷新一次UI"""
+        count = data.get('count', 0)
+        source = data.get('source_name', '未知来源')
+        logger.info(f"批量创建 {count} 个任务来自 {source}")
         self._refresh_list()
 
     def _on_download_completed(self, data):
@@ -322,10 +336,16 @@ class DownloadManager:
         if len(path_display) > 35:
             path_display = path_display[:35] + '...'
 
+        # 处理视频标题（可能还未解析）
+        if task.video:
+            title = task.video.title[:45] + ('...' if len(task.video.title) > 45 else '')
+        else:
+            title = f"解析中... ({task.task_id})"
+
         item = self.tree.insert(
             '',
             'end',
-            text=task.video.title[:45] + ('...' if len(task.video.title) > 45 else ''),
+            text=title,
             values=(
                 status_text,
                 source_text,
@@ -336,20 +356,16 @@ class DownloadManager:
             )
         )
 
-        # 根据状态设置颜色
+        # 根据状态设置颜色标签
         if task.status == TaskStatus.COMPLETED:
             if file_exists:
-                self.tree.tag_configure('completed', foreground='green')
                 self.tree.item(item, tags=('completed',))
             else:
                 # 文件不存在的已完成任务标红
-                self.tree.tag_configure('missing', foreground='red')
                 self.tree.item(item, tags=('missing',))
         elif task.status == TaskStatus.FAILED:
-            self.tree.tag_configure('failed', foreground='red')
             self.tree.item(item, tags=('failed',))
         elif task.status == TaskStatus.DOWNLOADING:
-            self.tree.tag_configure('downloading', foreground='blue')
             self.tree.item(item, tags=('downloading',))
 
         return item
@@ -382,6 +398,10 @@ class DownloadManager:
 
         # 来源文本
         source_text = self._get_source_text(task)
+
+        # 更新标题（如果已解析）
+        if task.video:
+            self.tree.item(item, text=task.video.title[:45] + ('...' if len(task.video.title) > 45 else ''))
 
         # 更新值
         self.tree.item(item, values=(
