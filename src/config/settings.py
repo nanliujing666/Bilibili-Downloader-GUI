@@ -16,6 +16,8 @@ class Settings:
     
     # 下载设置
     download_path: str = "./downloads"
+    audio_download_path: str = "./downloads"  # 音频下载路径（默认同视频路径）
+    audio_path_follow_video: bool = True      # 音频路径是否跟随视频路径
     temp_path: str = "./temp"
     default_quality: int = 80           # 默认1080P (qn=80)
     auto_quality: bool = True           # 自动选择最佳质量

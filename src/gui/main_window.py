@@ -337,6 +337,31 @@ class MainWindow(AsyncTkApp):
         ttk.Entry(path_frame, textvariable=self.path_var, state='readonly').pack(side='left', fill='x', expand=True)
         ttk.Button(path_frame, text="浏览", command=self._set_download_path).pack(side='left', padx=2)
 
+        # 音频下载路径
+        ttk.Label(parent, text="音频保存路径:", font=('Microsoft YaHei', 9, 'bold')).pack(anchor='w', pady=(10, 5))
+
+        # 跟随视频位置选项
+        self.audio_follow_video_var = tk.BooleanVar(value=settings.audio_path_follow_video)
+        ttk.Checkbutton(
+            parent,
+            text="跟随视频保存位置",
+            variable=self.audio_follow_video_var,
+            command=self._on_audio_follow_changed
+        ).pack(anchor='w', pady=(0, 5))
+
+        # 音频路径选择
+        audio_path_frame = ttk.Frame(parent)
+        audio_path_frame.pack(fill='x', pady=(0, 10))
+
+        self.audio_path_var = tk.StringVar(value=settings.audio_download_path)
+        self.audio_path_entry = ttk.Entry(audio_path_frame, textvariable=self.audio_path_var, state='readonly')
+        self.audio_path_entry.pack(side='left', fill='x', expand=True)
+        self.audio_path_button = ttk.Button(audio_path_frame, text="浏览", command=self._set_audio_download_path)
+        self.audio_path_button.pack(side='left', padx=2)
+
+        # 根据初始状态设置音频路径控件的可用性
+        self._update_audio_path_state()
+
         # 下载类型选择
         ttk.Label(parent, text="下载类型:", font=('Microsoft YaHei', 9, 'bold')).pack(anchor='w', pady=(10, 5))
 
@@ -759,7 +784,8 @@ class MainWindow(AsyncTkApp):
                 safe_title = sanitize_filename(video_title)[:50]
                 is_audio = settings.download_type == "audio"
                 file_ext = ".mp3" if is_audio else ".mp4"
-                output_path = os.path.join(settings.download_path, f"{safe_title}{file_ext}")
+                save_path = settings.audio_download_path if is_audio else settings.download_path
+                output_path = os.path.join(save_path, f"{safe_title}{file_ext}")
 
                 # 检查文件是否已存在
                 counter = 1
@@ -849,7 +875,9 @@ class MainWindow(AsyncTkApp):
 
         # 构建下载路径 - 使用课程名称作为子文件夹
         safe_course = sanitize_filename(course_title)
-        course_path = os.path.join(settings.download_path, safe_course)
+        is_audio = settings.download_type == "audio"
+        base_path = settings.audio_download_path if is_audio else settings.download_path
+        course_path = os.path.join(base_path, safe_course)
         os.makedirs(course_path, exist_ok=True)
 
         # 先收集所有任务，避免频繁UI更新
@@ -968,7 +996,9 @@ class MainWindow(AsyncTkApp):
 
                 # 构建课程下载目录路径
                 safe_course = sanitize_filename(course_title)
-                course_path = os.path.join(settings.download_path, safe_course)
+                is_audio = settings.download_type == "audio"
+                base_path = settings.audio_download_path if is_audio else settings.download_path
+                course_path = os.path.join(base_path, safe_course)
 
                 # 添加课程集合记录
                 history.add_course_record(
@@ -1000,7 +1030,9 @@ class MainWindow(AsyncTkApp):
 
             # 构建下载路径 - 使用课程名称作为子文件夹
             safe_course = sanitize_filename(course_title)
-            course_path = os.path.join(settings.download_path, safe_course)
+            is_audio = settings.download_type == "audio"
+            base_path = settings.audio_download_path if is_audio else settings.download_path
+            course_path = os.path.join(base_path, safe_course)
             os.makedirs(course_path, exist_ok=True)
 
             # 生成文件名
@@ -1097,7 +1129,36 @@ class MainWindow(AsyncTkApp):
         path = filedialog.askdirectory(title="选择下载目录")
         if path:
             self.path_var.set(path)
+            # 如果音频跟随视频，同步更新音频路径
+            if self.audio_follow_video_var.get():
+                self.audio_path_var.set(path)
             self._save_settings()
+
+    def _set_audio_download_path(self):
+        """设置音频下载路径"""
+        path = filedialog.askdirectory(title="选择音频保存目录")
+        if path:
+            self.audio_path_var.set(path)
+            self._save_settings()
+
+    def _on_audio_follow_changed(self):
+        """音频跟随视频选项改变"""
+        if self.audio_follow_video_var.get():
+            # 开启跟随时，同步视频路径
+            self.audio_path_var.set(self.path_var.get())
+        self._update_audio_path_state()
+        self._save_settings()
+
+    def _update_audio_path_state(self):
+        """更新音频路径控件的可用性"""
+        if self.audio_follow_video_var.get():
+            # 跟随时禁用音频路径选择
+            self.audio_path_entry.configure(state='disabled')
+            self.audio_path_button.configure(state='disabled')
+        else:
+            # 不跟随时启用音频路径选择
+            self.audio_path_entry.configure(state='readonly')
+            self.audio_path_button.configure(state='normal')
 
     def _on_auto_quality_changed(self):
         """自动质量选项改变"""
@@ -1152,6 +1213,8 @@ class MainWindow(AsyncTkApp):
         """保存设置"""
         settings = get_settings()
         settings.download_path = self.path_var.get()
+        settings.audio_download_path = self.audio_path_var.get()
+        settings.audio_path_follow_video = self.audio_follow_video_var.get()
         settings.default_quality = self.quality_var.get()
         settings.auto_quality = self.auto_quality_var.get()
         settings.minimize_to_tray = self.minimize_to_tray_var.get()

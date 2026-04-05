@@ -3,6 +3,7 @@ import asyncio
 import logging
 import os
 import uuid
+from pathlib import Path
 from typing import Optional, Callable, List
 from dataclasses import dataclass, field
 
@@ -24,8 +25,10 @@ from ..core.event_bus import get_event_bus
 
 logger = logging.getLogger(__name__)
 
-
 import time
+
+# 项目根目录（用于临时文件夹）
+PROJECT_ROOT = Path(__file__).parent.parent.parent
 
 @dataclass
 class DownloadProgress:
@@ -238,7 +241,10 @@ class DownloadService:
                 else:
                     # 生成新路径
                     safe_title = sanitize_filename(video_info.title)
-                    output_path = os.path.join(settings.download_path, f"{safe_title}{file_ext}")
+                    # 根据下载类型选择保存路径
+                    is_audio = settings.download_type == "audio"
+                    save_path = settings.audio_download_path if is_audio else settings.download_path
+                    output_path = os.path.join(save_path, f"{safe_title}{file_ext}")
                     # 检查文件是否已存在
                     counter = 1
                     original_output_path = output_path
@@ -470,8 +476,8 @@ class DownloadService:
         else:
             logger.info(f"[{task_id}] 使用任务设置的质量: {quality}")
 
-        # 创建临时目录
-        temp_dir = os.path.join(os.path.dirname(task.download_path), ".temp")
+        # 创建临时目录（使用项目根目录下的 .temp，而不是下载目录）
+        temp_dir = PROJECT_ROOT / ".temp"
         ensure_dir(temp_dir)
 
         video_temp = os.path.join(temp_dir, f"{task_id}_video.m4s")
