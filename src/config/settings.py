@@ -31,6 +31,10 @@ class Settings:
     download_danmaku: bool = False      # 下载弹幕
     download_subtitle: bool = False     # 下载字幕
     download_cover: bool = False        # 下载封面
+
+    # 音频下载设置
+    download_type: str = "video"        # 下载类型: video 或 audio
+    audio_embed_cover: bool = True      # 音频文件是否嵌入封面
     
     # 文件名模板
     filename_template: str = "{title}"  # 文件名模板

@@ -337,6 +337,52 @@ class MainWindow(AsyncTkApp):
         ttk.Entry(path_frame, textvariable=self.path_var, state='readonly').pack(side='left', fill='x', expand=True)
         ttk.Button(path_frame, text="浏览", command=self._set_download_path).pack(side='left', padx=2)
 
+        # 下载类型选择
+        ttk.Label(parent, text="下载类型:", font=('Microsoft YaHei', 9, 'bold')).pack(anchor='w', pady=(10, 5))
+
+        self.download_type_var = tk.StringVar(value=settings.download_type)
+        download_type_frame = ttk.Frame(parent)
+        download_type_frame.pack(fill='x', pady=5)
+
+        ttk.Radiobutton(
+            download_type_frame,
+            text="视频 (MP4)",
+            variable=self.download_type_var,
+            value="video",
+            command=self._on_download_type_changed
+        ).pack(side='left', padx=(0, 15))
+
+        ttk.Radiobutton(
+            download_type_frame,
+            text="音频 (MP3)",
+            variable=self.download_type_var,
+            value="audio",
+            command=self._on_download_type_changed
+        ).pack(side='left')
+
+        # 音频选项（仅在音频模式下显示）
+        self.audio_options_frame = ttk.Frame(parent)
+        self.audio_options_frame.pack(fill='x', pady=(5, 10))
+
+        self.audio_embed_cover_var = tk.BooleanVar(value=settings.audio_embed_cover)
+        self.audio_embed_cover_check = ttk.Checkbutton(
+            self.audio_options_frame,
+            text="写入封面到音频文件",
+            variable=self.audio_embed_cover_var,
+            command=self._on_audio_embed_cover_changed
+        )
+        self.audio_embed_cover_check.pack(anchor='w', padx=20)
+
+        ttk.Label(
+            self.audio_options_frame,
+            text="注: 音频将自动写入标题和作者等元数据",
+            font=('Microsoft YaHei', 8),
+            foreground='gray'
+        ).pack(anchor='w', padx=20, pady=(5, 0))
+
+        # 根据当前下载类型显示/隐藏音频选项
+        self._update_audio_options_visibility()
+
         # 视频质量
         ttk.Label(parent, text="视频质量:", font=('Microsoft YaHei', 9, 'bold')).pack(anchor='w', pady=(10, 5))
 
@@ -711,7 +757,9 @@ class MainWindow(AsyncTkApp):
 
                 # 生成下载路径
                 safe_title = sanitize_filename(video_title)[:50]
-                output_path = os.path.join(settings.download_path, f"{safe_title}.mp4")
+                is_audio = settings.download_type == "audio"
+                file_ext = ".mp3" if is_audio else ".mp4"
+                output_path = os.path.join(settings.download_path, f"{safe_title}{file_ext}")
 
                 # 检查文件是否已存在
                 counter = 1
@@ -825,14 +873,16 @@ class MainWindow(AsyncTkApp):
 
                 # 生成文件名
                 safe_title = sanitize_filename(video.title)
-                output_path = os.path.join(course_path, f"{safe_title}.mp4")
+                is_audio = settings.download_type == "audio"
+                file_ext = ".mp3" if is_audio else ".mp4"
+                output_path = os.path.join(course_path, f"{safe_title}{file_ext}")
 
                 # 检查文件是否已存在
                 counter = 1
                 original_output_path = output_path
                 while os.path.exists(output_path):
                     base, ext = os.path.splitext(original_output_path)
-                    output_path = f"{base}_{counter}{ext}"
+                    output_path = f"{base}_{counter}{file_ext}"
                     counter += 1
 
                 # 创建任务（不立即添加到state_manager）
@@ -955,14 +1005,16 @@ class MainWindow(AsyncTkApp):
 
             # 生成文件名
             safe_title = sanitize_filename(video.title)
-            output_path = os.path.join(course_path, f"{safe_title}.mp4")
+            is_audio = settings.download_type == "audio"
+            file_ext = ".mp3" if is_audio else ".mp4"
+            output_path = os.path.join(course_path, f"{safe_title}{file_ext}")
 
             # 检查文件是否已存在
             counter = 1
             original_output_path = output_path
             while os.path.exists(output_path):
                 base, ext = os.path.splitext(original_output_path)
-                output_path = f"{base}_{counter}{ext}"
+                output_path = f"{base}_{counter}{file_ext}"
                 counter += 1
 
             # 创建任务，添加课程来源信息（只创建，不自动开始）
@@ -1079,6 +1131,23 @@ class MainWindow(AsyncTkApp):
         for radio in self.quality_radios:
             radio.configure(state='disabled' if auto else 'normal')
 
+    def _on_download_type_changed(self):
+        """下载类型改变"""
+        self._update_audio_options_visibility()
+        self._save_settings()
+
+    def _on_audio_embed_cover_changed(self):
+        """音频封面嵌入选项改变"""
+        self._save_settings()
+
+    def _update_audio_options_visibility(self):
+        """根据下载类型更新音频选项的可见性"""
+        is_audio = self.download_type_var.get() == "audio"
+        if is_audio:
+            self.audio_options_frame.pack(fill='x', pady=(5, 10))
+        else:
+            self.audio_options_frame.pack_forget()
+
     def _save_settings(self):
         """保存设置"""
         settings = get_settings()
@@ -1088,6 +1157,8 @@ class MainWindow(AsyncTkApp):
         settings.minimize_to_tray = self.minimize_to_tray_var.get()
         settings.max_concurrent = self.concurrent_var.get()
         settings.page_size = self.page_size_var.get()
+        settings.download_type = self.download_type_var.get()
+        settings.audio_embed_cover = self.audio_embed_cover_var.get()
         settings.save(settings.get_default_path())
         self.status_var.set("设置已保存")
 

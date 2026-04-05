@@ -303,3 +303,235 @@ def check_ffmpeg() -> bool:
         return result.returncode == 0
     except FileNotFoundError:
         return False
+
+
+def convert_to_mp3(
+    audio_file: str,
+    output_file: str,
+    bitrate: str = "320k",
+    progress_callback: Optional[Callable[[float], None]] = None
+) -> bool:
+    """
+    将音频文件转换为MP3格式
+
+    Args:
+        audio_file: 输入音频文件路径（通常是M4A/AAC格式）
+        output_file: 输出MP3文件路径
+        bitrate: 音频比特率，默认320k
+        progress_callback: 进度回调函数(0-100)
+
+    Returns:
+        是否成功
+    """
+    ffmpeg_cmd = get_ffmpeg_cmd("ffmpeg")
+
+    # 构建转换命令
+    cmd = ffmpeg_cmd + [
+        '-y',  # 覆盖输出文件
+        '-i', audio_file,  # 输入文件
+        '-vn',  # 不处理视频
+        '-ar', '44100',  # 采样率44.1kHz
+        '-ac', '2',  # 立体声
+        '-b:a', bitrate,  # 音频比特率
+        '-f', 'mp3',  # 输出格式
+        output_file
+    ]
+
+    logger.info(f"开始转换音频为MP3: {audio_file} -> {output_file}")
+
+    try:
+        # 设置环境变量
+        ffmpeg_dir = get_ffmpeg_dir()
+        env = os.environ.copy()
+        if ffmpeg_dir:
+            env['PATH'] = str(ffmpeg_dir) + os.pathsep + env.get('PATH', '')
+
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            universal_newlines=True,
+            encoding='utf-8',
+            env=env,
+            creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
+        )
+
+        # 读取输出
+        for line in process.stdout:
+            # 可以解析进度信息
+            if progress_callback and 'time=' in line:
+                # 简化处理，不详细解析时间
+                pass
+
+        return_code = process.wait()
+
+        if return_code == 0:
+            logger.info(f"音频转换成功: {output_file}")
+            return True
+        else:
+            logger.error(f"音频转换失败，返回码: {return_code}")
+            return False
+
+    except Exception as e:
+        logger.error(f"音频转换异常: {e}")
+        return False
+
+
+def add_id3_tags(
+    mp3_file: str,
+    title: Optional[str] = None,
+    artist: Optional[str] = None,
+    album: Optional[str] = None,
+    cover_path: Optional[str] = None
+) -> bool:
+    """
+    添加ID3标签到MP3文件
+
+    Args:
+        mp3_file: MP3文件路径
+        title: 标题 (TIT2)
+        artist: 艺术家 (TPE1)
+        album: 专辑 (TALB)
+        cover_path: 封面图片路径（JPEG格式）
+
+    Returns:
+        是否成功
+    """
+    try:
+        # 尝试导入mutagen
+        try:
+            from mutagen.mp3 import MP3
+            from mutagen.id3 import ID3, TIT2, TPE1, TALB, APIC
+        except ImportError:
+            logger.warning("mutagen库未安装，使用FFmpeg添加元数据")
+            return _add_id3_tags_with_ffmpeg(mp3_file, title, artist, album, cover_path)
+
+        logger.info(f"添加ID3标签: {mp3_file}")
+
+        # 加载MP3文件
+        try:
+            audio = MP3(mp3_file)
+        except Exception as e:
+            logger.error(f"无法加载MP3文件: {e}")
+            return False
+
+        # 确保ID3标签存在
+        if audio.tags is None:
+            audio.add_tags()
+
+        tags = audio.tags
+
+        # 添加标题
+        if title:
+            tags["TIT2"] = TIT2(encoding=3, text=title)
+            logger.debug(f"设置标题: {title}")
+
+        # 添加艺术家
+        if artist:
+            tags["TPE1"] = TPE1(encoding=3, text=artist)
+            logger.debug(f"设置艺术家: {artist}")
+
+        # 添加专辑
+        if album:
+            tags["TALB"] = TALB(encoding=3, text=album)
+            logger.debug(f"设置专辑: {album}")
+
+        # 添加封面
+        if cover_path and os.path.exists(cover_path):
+            try:
+                with open(cover_path, 'rb') as f:
+                    cover_data = f.read()
+
+                # 确定MIME类型
+                if cover_path.lower().endswith('.png'):
+                    mime = 'image/png'
+                else:
+                    mime = 'image/jpeg'
+
+                tags["APIC"] = APIC(
+                    encoding=3,  # UTF-8
+                    mime=mime,
+                    type=3,  # 封面图片
+                    desc='Cover',
+                    data=cover_data
+                )
+                logger.debug(f"添加封面: {cover_path}")
+            except Exception as e:
+                logger.warning(f"添加封面失败: {e}")
+
+        # 保存标签
+        audio.save()
+
+        logger.info(f"ID3标签添加成功: {mp3_file}")
+        return True
+
+    except Exception as e:
+        logger.error(f"添加ID3标签失败: {e}")
+        return False
+
+
+def _add_id3_tags_with_ffmpeg(
+    mp3_file: str,
+    title: Optional[str] = None,
+    artist: Optional[str] = None,
+    album: Optional[str] = None,
+    cover_path: Optional[str] = None
+) -> bool:
+    """
+    使用FFmpeg添加元数据（当mutagen不可用时使用）
+
+    注意：这会重新编码文件，比较慢
+    """
+    ffmpeg_cmd = get_ffmpeg_cmd("ffmpeg")
+
+    # 构建命令
+    cmd = ffmpeg_cmd + ['-y', '-i', mp3_file]
+
+    # 添加元数据
+    if title:
+        cmd.extend(['-metadata', f'title={title}'])
+    if artist:
+        cmd.extend(['-metadata', f'artist={artist}'])
+    if album:
+        cmd.extend(['-metadata', f'album={album}'])
+
+    # 如果有封面，添加封面
+    if cover_path and os.path.exists(cover_path):
+        # 需要更复杂的处理，暂时跳过
+        logger.warning("FFmpeg添加封面功能未实现，跳过封面")
+
+    # 复制流（不重新编码）
+    cmd.extend(['-c', 'copy', f"{mp3_file}.temp.mp3"])
+
+    logger.info(f"使用FFmpeg添加元数据: {mp3_file}")
+
+    try:
+        ffmpeg_dir = get_ffmpeg_dir()
+        env = os.environ.copy()
+        if ffmpeg_dir:
+            env['PATH'] = str(ffmpeg_dir) + os.pathsep + env.get('PATH', '')
+
+        result = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=env,
+            creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
+        )
+
+        if result.returncode == 0:
+            # 替换原文件
+            import shutil
+            shutil.move(f"{mp3_file}.temp.mp3", mp3_file)
+            logger.info(f"FFmpeg元数据添加成功: {mp3_file}")
+            return True
+        else:
+            logger.error(f"FFmpeg元数据添加失败: {result.stderr}")
+            # 清理临时文件
+            if os.path.exists(f"{mp3_file}.temp.mp3"):
+                os.remove(f"{mp3_file}.temp.mp3")
+            return False
+
+    except Exception as e:
+        logger.error(f"FFmpeg元数据添加异常: {e}")
+        return False

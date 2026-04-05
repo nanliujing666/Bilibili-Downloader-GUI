@@ -18,7 +18,7 @@ from ..api.auth_service import AuthService
 from ..models.download import DownloadTask, TaskStatus
 from ..models.download_history import DownloadHistoryItem, get_download_history
 from ..utils.path_utils import sanitize_filename, ensure_dir
-from ..utils.ffmpeg_utils import merge_video_audio, check_ffmpeg
+from ..utils.ffmpeg_utils import merge_video_audio, check_ffmpeg, convert_to_mp3, add_id3_tags
 from ..core.state_manager import get_state_manager
 from ..core.event_bus import get_event_bus
 
@@ -223,20 +223,28 @@ class DownloadService:
                 # 设置下载路径（如果任务已经有路径，则只更新视频信息）
                 from ..config.settings import get_settings
                 settings = get_settings()
+                is_audio = settings.download_type == "audio"
+                file_ext = ".mp3" if is_audio else ".mp4"
+
                 if task.download_path:
-                    # 任务已有路径，保持原路径
+                    # 任务已有路径，但可能需要调整扩展名
                     output_path = task.download_path
+                    # 如果下载类型改变，需要调整扩展名
+                    if is_audio and output_path.endswith('.mp4'):
+                        output_path = output_path[:-4] + '.mp3'
+                    elif not is_audio and output_path.endswith('.mp3'):
+                        output_path = output_path[:-4] + '.mp4'
                     logger.info(f"任务 {task_id} 使用预设路径: {output_path}")
                 else:
                     # 生成新路径
                     safe_title = sanitize_filename(video_info.title)
-                    output_path = os.path.join(settings.download_path, f"{safe_title}.mp4")
+                    output_path = os.path.join(settings.download_path, f"{safe_title}{file_ext}")
                     # 检查文件是否已存在
                     counter = 1
                     original_output_path = output_path
                     while os.path.exists(output_path):
                         base, ext = os.path.splitext(original_output_path)
-                        output_path = f"{base}_{counter}{ext}"
+                        output_path = f"{base}_{counter}{file_ext}"
                         counter += 1
                 # 更新任务信息
                 self.state_manager.update(
@@ -433,13 +441,14 @@ class DownloadService:
         from ..config.settings import get_settings
         settings = get_settings()
         quality = task.quality
+        is_audio_download = settings.download_type == "audio"
 
         # 使用第一个分P的cid
         cid = task.video.cid if task.video.cid else (
             task.video.pages[0].cid if task.video.pages else 0
         )
 
-        logger.info(f"[{task_id}] 任务质量设置: {quality}, 自动质量: {settings.auto_quality}, CID: {cid}")
+        logger.info(f"[{task_id}] 任务质量设置: {quality}, 自动质量: {settings.auto_quality}, CID: {cid}, 音频下载: {is_audio_download}")
 
         if settings.auto_quality:
             try:
@@ -469,6 +478,15 @@ class DownloadService:
         audio_temp = os.path.join(temp_dir, f"{task_id}_audio.m4s")
         self._temp_files[task_id] = (video_temp, audio_temp)
 
+        # 如果是音频下载模式
+        if is_audio_download:
+            await self._do_audio_download(task, task_id, cid, quality, audio_temp, settings)
+        else:
+            await self._do_video_download(task, task_id, cid, quality, video_temp, audio_temp)
+
+    async def _do_video_download(self, task: DownloadTask, task_id: str, cid: int, quality: int,
+                                  video_temp: str, audio_temp: str) -> None:
+        """执行视频下载流程"""
         # 下载视频流（带重试，用户无感知）
         logger.info(f"[{task_id}] 开始下载视频流...")
         video_success = await self._download_stream_with_retry(
@@ -531,6 +549,129 @@ class DownloadService:
         })
 
         logger.info(f"下载完成 {task_id}: {task.download_path}")
+
+    async def _do_audio_download(self, task: DownloadTask, task_id: str, cid: int, quality: int,
+                                  audio_temp: str, settings) -> None:
+        """执行音频下载流程"""
+        # 下载音频流（带重试，用户无感知）
+        logger.info(f"[{task_id}] 开始下载音频流...")
+        audio_success = await self._download_stream_with_retry(
+            task_id, task.video.bvid, cid, quality, audio_temp, 'audio'
+        )
+        if not audio_success:
+            if not self._active_downloads.get(task_id, True):
+                raise RuntimeError("下载已取消")
+            raise RuntimeError("网络连接失败，请检查网络后重新开始下载")
+
+        # 转换音频为MP3
+        logger.info(f"[{task_id}] 开始转换音频为MP3...")
+        self.state_manager.update(
+            lambda s: s.update_task(task_id, status=TaskStatus.MERGING)
+        )
+
+        # 准备元数据
+        title = task.video.title
+        owner_name = "未知UP"
+        if isinstance(task.video.owner, dict):
+            owner_name = task.video.owner.get('name', '未知UP')
+
+        # 下载封面（如果需要嵌入）
+        cover_path = None
+        if settings.audio_embed_cover and task.video.cover_url:
+            try:
+                cover_path = os.path.join(os.path.dirname(audio_temp), f"{task_id}_cover.jpg")
+                cover_success = await self._download_cover(task.video.cover_url, cover_path)
+                if not cover_success:
+                    cover_path = None
+            except Exception as e:
+                logger.warning(f"[{task_id}] 下载封面失败: {e}")
+                cover_path = None
+
+        # 转换并添加元数据
+        def convert_progress(p: float):
+            """转换进度回调"""
+            if task_id in self._progress:
+                self._progress[task_id].merge_progress = p / 100.0
+                self._update_task_progress(task_id)
+
+        # 先转换为MP3
+        mp3_path = task.download_path
+        # 确保路径是.mp3后缀
+        if not mp3_path.endswith('.mp3'):
+            mp3_path = os.path.splitext(mp3_path)[0] + '.mp3'
+
+        convert_success = await asyncio.to_thread(
+            convert_to_mp3,
+            audio_temp,
+            mp3_path,
+            progress_callback=convert_progress
+        )
+
+        if not convert_success:
+            raise RuntimeError("音频转换失败")
+
+        # 添加ID3标签
+        tags_success = await asyncio.to_thread(
+            add_id3_tags,
+            mp3_path,
+            title=title,
+            artist=owner_name,
+            cover_path=cover_path
+        )
+
+        if not tags_success:
+            logger.warning(f"[{task_id}] 添加ID3标签失败")
+
+        # 清理封面临时文件
+        if cover_path and os.path.exists(cover_path):
+            try:
+                os.remove(cover_path)
+            except Exception as e:
+                logger.warning(f"删除封面临时文件失败: {cover_path}, {e}")
+
+        # 下载完成
+        self.state_manager.update(
+            lambda s: s.update_task(
+                task_id=task.task_id,
+                status=TaskStatus.COMPLETED,
+                progress=100.0
+            )
+        )
+
+        # 保存下载历史记录
+        self._save_download_history(task)
+
+        self.event_bus.publish('download.completed', {
+            'task_id': task.task_id,
+            'output_path': mp3_path
+        })
+
+        logger.info(f"音频下载完成 {task_id}: {mp3_path}")
+
+    async def _download_cover(self, cover_url: str, output_path: str) -> bool:
+        """下载封面图片"""
+        try:
+            headers = {
+                'Referer': 'https://www.bilibili.com',
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            }
+
+            timeout = aiohttp.ClientTimeout(connect=30, sock_read=30)
+            connector = aiohttp.TCPConnector(limit=5, force_close=True)
+
+            async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
+                async with session.get(cover_url, headers=headers) as response:
+                    if response.status != 200:
+                        return False
+
+                    async with aiofiles.open(output_path, 'wb') as f:
+                        async for chunk in response.content.iter_chunked(8192):
+                            await f.write(chunk)
+
+            return True
+        except Exception as e:
+            logger.error(f"下载封面失败: {e}")
+            return False
 
     def _save_download_history(self, task: DownloadTask):
         """保存下载历史记录"""
