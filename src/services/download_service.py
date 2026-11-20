@@ -963,7 +963,28 @@ class DownloadService:
         logger.info(f"取消下载: {task_id}")
 
     def resume_download(self, task_id: str) -> None:
-        """恢复下载（重新启动下载流程）"""
+        """恢复下载（同步入口）
+
+        注意：只能在事件循环线程中调用。GUI 主线程（Tk 回调）请通过
+        ``asyncio.run_coroutine_threadsafe`` 调用 :meth:`resume_download_async`，
+        否则会触发 ``RuntimeError: no running event loop``。
+        """
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        if loop is None:
+            logger.error(
+                f"恢复下载失败: 当前线程没有运行中的事件循环，"
+                f"请改用 resume_download_async（task_id={task_id}）"
+            )
+            return
+
+        loop.create_task(self.resume_download_async(task_id))
+
+    async def resume_download_async(self, task_id: str) -> None:
+        """恢复下载（异步版，供 GUI 的 async_runner 调用）"""
         state = self.state_manager.get_state()
         task = None
         for t in state.download_tasks:
@@ -971,21 +992,28 @@ class DownloadService:
                 task = t
                 break
 
-        if task and task.status in [TaskStatus.PAUSED, TaskStatus.FAILED]:
-            # 重置_active_downloads标志，确保任务可以被正常处理
-            self._active_downloads[task_id] = True
-            # 重置状态并重新开始
-            self.state_manager.update(
-                lambda s: s.update_task(
-                    task_id,
-                    status=TaskStatus.PENDING,
-                    progress=0.0,
-                    error_message=None
-                )
+        if task is None:
+            logger.warning(f"恢复下载失败，任务不存在: {task_id}")
+            return
+
+        if task.status not in [TaskStatus.PAUSED, TaskStatus.FAILED]:
+            logger.info(f"任务 {task_id} 状态为 {task.status}，无需恢复")
+            return
+
+        # 重置_active_downloads标志，确保任务可以被正常处理
+        self._active_downloads[task_id] = True
+        # 重置状态并重新开始
+        self.state_manager.update(
+            lambda s: s.update_task(
+                task_id,
+                status=TaskStatus.PENDING,
+                progress=0.0,
+                error_message=None
             )
-            # 异步启动下载
-            asyncio.create_task(self.start_download(task_id))
-            logger.info(f"恢复下载: {task_id}")
+        )
+        # 重新加入下载队列
+        await self.start_download(task_id)
+        logger.info(f"恢复下载: {task_id}")
 
     async def download_favorite(self, favorite_id: str, favorite_name: str,
                                 videos: List, quality: int = 80) -> List[str]:

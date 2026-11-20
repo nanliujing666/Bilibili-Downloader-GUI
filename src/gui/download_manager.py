@@ -644,7 +644,13 @@ class DownloadManager:
     def _restart_selected(self):
         """重新下载选中的任务"""
         for task_id in self._get_selected_task_ids():
-            self.download_service.resume_download(task_id)
+            if self.async_runner:
+                # GUI 主线程没有事件循环，必须交给后台循环执行
+                self.async_runner(
+                    self.download_service.resume_download_async(task_id)
+                )
+            else:
+                self.download_service.resume_download(task_id)
 
     def _remove_selected(self):
         """删除选中的任务（支持批量删除任何状态的任务）"""

@@ -8,12 +8,17 @@ from dataclasses import dataclass, asdict
 from datetime import datetime
 
 try:
-    from bilibili_api import login_v2, Credential
-    import qrcode
+    from bilibili_api import Credential
 except ImportError:
-    raise ImportError("请先安装: pip install bilibili-api-python qrcode")
+    raise ImportError("请先安装: pip install bilibili-api-python")
 
 from ..models.user import UserInfo
+from .qr_login import (
+    FLOW_DONE,
+    FLOW_ERROR,
+    FLOW_EXPIRED,
+    QrCodeLoginWeb,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +41,7 @@ class AuthService:
         self.credential: Optional[Credential] = None
         self.user_info: Optional[UserInfo] = None
         self._login_callback: Optional[Callable[[LoginStatus], None]] = None
-        self._qr_login: Optional[login_v2.QrCodeLogin] = None
+        self._qr_login: Optional[QrCodeLoginWeb] = None
     
     def set_login_callback(self, callback: Callable[[LoginStatus], None]) -> None:
         """设置登录状态变更回调"""
@@ -50,39 +55,44 @@ class AuthService:
         """扫码登录"""
         try:
             logger.info("开始扫码登录")
-            
-            qr = login_v2.QrCodeLogin(platform=login_v2.QrCodeLoginChannel.WEB)
+
+            qr = QrCodeLoginWeb()
             await qr.generate_qrcode()
-            
-            qr_url = qr.get_qrcode_url()
-            logger.info(f"获取到二维码URL")
-            
+
+            logger.info("获取到二维码URL")
+
             if on_qrcode:
-                on_qrcode(qr_url)
-            
+                on_qrcode(qr.qrcode_url)
+
             # 轮询登录状态
-            while not qr.has_done():
-                state = await qr.check_state()
-                status_text = str(state)
-                
+            while True:
+                state, message, credential = await qr.poll()
+
                 if on_status_change:
-                    on_status_change(status_text)
-                
+                    on_status_change(message)
+
+                if state == FLOW_DONE and credential is not None:
+                    break
+                if state == FLOW_EXPIRED:
+                    raise RuntimeError("二维码已过期")
+                if state == FLOW_ERROR:
+                    raise RuntimeError(message)
+
                 await asyncio.sleep(1)
-            
+
             # 登录成功
-            self.credential = qr.get_credential()
+            self.credential = credential
             self.user_info = await self._fetch_user_info()
             await self._save_cookies()
-            
+
             status = LoginStatus(is_logged_in=True, user_info=self.user_info)
-            
+
             if self._login_callback:
                 self._login_callback(status)
-            
-            logger.info(f"登录成功")
+
+            logger.info("登录成功")
             return status
-            
+
         except Exception as e:
             logger.error(f"登录失败: {e}")
             status = LoginStatus(is_logged_in=False, error_message=str(e))
@@ -168,6 +178,10 @@ class AuthService:
         if self.credential is None:
             return
 
+        if not self.credential.has_sessdata():
+            logger.error("凭据中没有 SESSDATA，跳过保存 Cookie")
+            return
+
         try:
             cookies = self.credential.get_cookies()
 
@@ -203,12 +217,24 @@ class AuthService:
 
             cookies = data.get('cookies', {})
 
+            def _get(name: str) -> str:
+                # 兼容大小写不同的 Cookie 键
+                return cookies.get(name) or cookies.get(name.lower()) or cookies.get(name.upper()) or ''
+
             self.credential = Credential(
-                sessdata=cookies.get('SESSDATA', ''),
-                bili_jct=cookies.get('bili_jct', ''),
-                buvid3=cookies.get('buvid3', ''),
-                ac_time_value=cookies.get('ac_time_value', '')
+                sessdata=_get('SESSDATA'),
+                bili_jct=_get('bili_jct'),
+                buvid3=_get('buvid3'),
+                buvid4=_get('buvid4'),
+                dedeuserid=_get('DedeUserID'),
+                ac_time_value=_get('ac_time_value')
             )
+
+            if not self.credential.has_sessdata():
+                logger.warning("Cookie 文件中缺少 SESSDATA，需要重新登录")
+                self.credential = None
+                self.user_info = None
+                return False
 
             user_info_data = data.get('user_info')
             if user_info_data:
@@ -232,11 +258,24 @@ class AuthService:
 
             cookies = data.get('cookies', {})
 
+            def _get(name: str) -> str:
+                # 兼容大小写不同的 Cookie 键
+                return cookies.get(name) or cookies.get(name.lower()) or cookies.get(name.upper()) or ''
+
             self.credential = Credential(
-                sessdata=cookies.get('SESSDATA', ''),
-                bili_jct=cookies.get('bili_jct', ''),
-                buvid3=cookies.get('buvid3', '')
+                sessdata=_get('SESSDATA'),
+                bili_jct=_get('bili_jct'),
+                buvid3=_get('buvid3'),
+                buvid4=_get('buvid4'),
+                dedeuserid=_get('DedeUserID'),
+                ac_time_value=_get('ac_time_value')
             )
+
+            if not self.credential.has_sessdata():
+                logger.warning("Cookie 文件中缺少 SESSDATA，需要重新登录")
+                self.credential = None
+                self.user_info = None
+                return False
 
             user_info_data = data.get('user_info')
             if user_info_data:
@@ -260,13 +299,8 @@ class AuthService:
 
     async def get_qr_code(self) -> bytes:
         """获取登录二维码图片（供GUI调用）"""
-        self._qr_login = login_v2.QrCodeLogin(platform=login_v2.QrCodeLoginChannel.WEB)
-        await self._qr_login.generate_qrcode()
-
-        # 获取二维码图片 (Picture对象)
-        picture = self._qr_login.get_qrcode_picture()
-        # 返回图片字节数据
-        return picture.content
+        self._qr_login = QrCodeLoginWeb()
+        return await self._qr_login.generate_qrcode()
 
     async def check_qr_status(self) -> tuple[bool, str]:
         """检查二维码登录状态（供GUI调用）
@@ -277,24 +311,20 @@ class AuthService:
         if self._qr_login is None:
             return False, "二维码未生成"
 
-        if self._qr_login.has_done():
-            # 登录成功
-            self.credential = self._qr_login.get_credential()
-            self.user_info = await self._fetch_user_info()
-            await self._save_cookies()
-            return True, "登录成功"
-
         try:
-            state = await self._qr_login.check_state()
-            state_str = str(state)
+            state, message, credential = await self._qr_login.poll()
 
-            # 解析状态
-            if '扫码成功' in state_str or '已扫码' in state_str:
-                return False, "已扫码，请在手机上确认"
-            elif '过期' in state_str or '失效' in state_str:
-                return False, "二维码已过期"
-            else:
-                return False, "等待扫码..."
+            if state == FLOW_DONE and credential is not None:
+                self.credential = credential
+                self.user_info = await self._fetch_user_info()
+                await self._save_cookies()
+                return True, "登录成功"
+
+            if state == FLOW_ERROR:
+                # 接口异常单独提示，避免被当成「二维码过期」
+                return False, message
+
+            return False, message
 
         except Exception as e:
             logger.error(f"检查二维码状态失败: {e}")

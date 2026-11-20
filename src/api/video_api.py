@@ -4,6 +4,13 @@ from typing import Optional, List, Dict, Any
 
 try:
     from bilibili_api import video, Credential, bangumi, cheese
+    from bilibili_api.video import (
+        AudioQuality,
+        AudioStreamDownloadURL,
+        VideoCodecs,
+        VideoQuality,
+        VideoStreamDownloadURL,
+    )
 except ImportError:
     raise ImportError("请先安装: pip install bilibili-api-python")
 
@@ -199,17 +206,23 @@ class VideoApiClient:
         logger.info(f"[视频API] 请求质量 {quality} 转换为 VideoQuality: {video_quality}")
 
         # 根据指定的质量选择流
-        streams = detector.detect_best_streams(video_max_quality=video_quality)
+        video_stream, audio_stream = self._select_streams(detector, video_quality)
 
-        # 记录返回的流信息
-        if len(streams) > 0:
-            video_stream = streams[0]
-            stream_quality = getattr(video_stream, 'quality', 'unknown')
-            stream_codec = getattr(video_stream, 'codecs', 'unknown')
-            logger.info(f"[视频API] 选择的视频流: quality={stream_quality}, codec={stream_codec}")
+        if video_stream is not None:
+            logger.info(
+                f"[视频API] 选择的视频流: quality={getattr(video_stream, 'video_quality', 'unknown')}, "
+                f"codec={getattr(video_stream, 'video_codecs', 'unknown')}"
+            )
+        if audio_stream is not None:
+            logger.info(
+                f"[视频API] 选择的音频流: quality={getattr(audio_stream, 'audio_quality', 'unknown')}"
+            )
 
-        video_url = streams[0].url if len(streams) > 0 else ""
-        audio_url = streams[1].url if len(streams) > 1 else ""
+        video_url = video_stream.url if video_stream is not None else ""
+        audio_url = audio_stream.url if audio_stream is not None else ""
+
+        if not video_url:
+            raise ApiError("未找到可用的视频流")
 
         logger.info(f"[视频API] 返回下载链接: quality={quality}, 视频URL长度={len(video_url)}, 音频URL长度={len(audio_url)}")
 
@@ -218,6 +231,55 @@ class VideoApiClient:
             'audio_url': audio_url,
             'quality': quality
         }
+
+    # 编码优先级（与 bilibili-api 默认一致：AV1 > AVC > HEVC）
+    _CODEC_PRIORITY = {
+        VideoCodecs.AV1: 0,
+        VideoCodecs.AVC: 1,
+        VideoCodecs.HEV: 2,
+    }
+
+    def _select_streams(self, detector, video_quality: VideoQuality):
+        """从 DASH 数据中选择视频/音频流
+
+        不使用 ``VideoDownloadURLDataDetecter.detect_best_streams``：
+        bilibili-api 17.4.1 在比较多个同清晰度流时，会对编码识别失败的流
+        （如 ``hvc1`` 开头的 HEVC，库只匹配 ``hev``，会得到 ``None``）
+        调用 ``None.value``，直接抛 AttributeError。
+        """
+        # FLV / MP4（durl）流没有音视频分离
+        if detector.check_flv_mp4_stream():
+            streams = detector.detect_all()
+            return (streams[0] if streams else None), None
+
+        streams = detector.detect()
+
+        videos = [
+            s for s in streams
+            if isinstance(s, VideoStreamDownloadURL)
+            and s.video_quality.value <= video_quality.value
+        ]
+        audios = [s for s in streams if isinstance(s, AudioStreamDownloadURL)]
+
+        def video_key(s: VideoStreamDownloadURL):
+            return (
+                s.video_quality.value,
+                -self._CODEC_PRIORITY.get(
+                    s.video_codecs, len(self._CODEC_PRIORITY)
+                ),
+            )
+
+        def audio_key(s: AudioStreamDownloadURL):
+            # 与库默认一致：杜比 > Hi-Res > 普通音质
+            if s.audio_quality == AudioQuality.DOLBY:
+                return (2, 0)
+            if s.audio_quality == AudioQuality.HI_RES:
+                return (1, 0)
+            return (0, s.audio_quality.value)
+
+        video_stream = max(videos, key=video_key) if videos else None
+        audio_stream = max(audios, key=audio_key) if audios else None
+        return video_stream, audio_stream
 
     async def get_available_qualities(self, bvid: str, cid: int) -> List[dict]:
         """获取视频可用的清晰度列表
